@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // CodeBuddy collaboration panel.
 // The pill (composer dock) and the panel (above the composer) both read one
 // host-polled store, so they can never disagree with the host or each other.
