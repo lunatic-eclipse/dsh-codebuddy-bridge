@@ -25,7 +25,7 @@ mkdirSync(backupDir, { recursive: true });
 const BEFORE = '改前的内容\n';
 writeFileSync(join(backupDir, BACKUP), BEFORE, 'utf8');
 
-const { verifyRound } = await import('../index.js');
+const { verifyRound, buildReviewPrompt } = await import('../index.js');
 
 const T0 = Date.now() - 600000;
 
@@ -204,6 +204,23 @@ test('forward slashes in the prompt still identify the same file', () => {
     reads: ['src/a.md'],
   });
   assert.doesNotMatch(verifyRound(ok, {}).text, /UNREAD/);
+});
+
+test('the review prompt is fixed: read-only, capped, and short', () => {
+  const prompt = buildReviewPrompt('a.js', '', undefined);
+  assert.match(prompt, /只读审查/);
+  assert.match(prompt, /文件：a\.js/);
+  assert.match(prompt, /最多 3 条/);
+  assert.match(prompt, /200 字内/);
+  assert.doesNotMatch(prompt, /只看：/);
+});
+
+test('focus and maxFindings only add detail, never drop the core rules', () => {
+  const prompt = buildReviewPrompt('a.js', 'verifyRound 的并发', 9);
+  assert.match(prompt, /只看：verifyRound 的并发/);
+  assert.match(prompt, /最多 5 条/);
+  assert.match(prompt, /只读审查/);
+  assert.match(prompt, /不要修改任何文件/);
 });
 
 test('rounds of one CLI session do not bleed into each other', () => {

@@ -56,7 +56,29 @@ const DEFAULT_IDLE_MS = 60 * 60 * 1000;
 const MAX_STDERR = 8 * 1024;
 
 /** Tools hidden from an agent while collaboration mode is off for its session. */
-const GATED_TOOLS = ['codebuddy_ask', 'workbuddy_relay', 'workbuddy_task', 'workbuddy_dispatch'];
+const GATED_TOOLS = ['codebuddy_ask', 'workbuddy_relay', 'workbuddy_review', 'workbuddy_task', 'workbuddy_dispatch'];
+
+/**
+ * The fixed review prompt. Word budget and the "where — problem — fix" shape
+ * exist to keep the round fast: most of the wall time is the model's own
+ * reasoning, and an open-ended "please review" invites a 20k-token essay.
+ */
+export function buildReviewPrompt(path, focus, maxFindings) {
+  const limit = Number.isInteger(maxFindings) ? Math.min(5, Math.max(1, maxFindings)) : 3;
+  const lines = [
+    '任务：只读审查，不要修改任何文件。',
+    `文件：${path}`,
+  ];
+  if (typeof focus === 'string' && focus.trim()) {
+    lines.push(`只看：${focus.trim()}（不要去通读整份文件之外的部分）`);
+  }
+  lines.push(
+    `请只报「能指出具体位置」的问题，最多 ${limit} 条，按严重程度排序。`,
+    '每条一行：位置 — 问题 — 改法。',
+    '结论控制在 200 字内；不要复述文件内容，不要解释你的思考过程，不要联网。',
+  );
+  return lines.join('\n');
+}
 
 /** Trim an engine tool payload down to something a human can approve. */
 function summarizeToolInput(input, limit = 600) {
@@ -2083,7 +2105,61 @@ export function apply(ctx, config = {}) {
 
   ctx.effect(() =>
     ctx.tools.register({
-      name: 'workbuddy_probe',
+      name: 'workbuddy_review',
+      description:
+        '让 CodeBuddy 只读审查一个文件，并自动核对它到底读没读：固定模板（只读、只报可定位问题、最多 N 条、200 字内），' +
+        '跑完直接返回核对结果（UNREAD/无写入），不用再手动调 workbuddy_verify。需要协作模式开启。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '要审的文件（相对工作区的路径或绝对路径）。' },
+          focus: { type: 'string', description: '可选：只看哪一部分（函数名、小节、关注点），能明显缩短这一轮。' },
+          maxFindings: { type: 'integer', description: '可选：最多几条问题，1–5，默认 3。' },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      },
+      output: {
+        schema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+        render(_args, value) {
+          return [{ type: 'text', text: value.text }];
+        },
+      },
+      async execute(args, exec) {
+        if (!bridge.isEnabled(exec.agent?.id)) {
+          return { text: '协作模式没开：先在输入框下方点一下「CodeBuddy 协作」。' };
+        }
+        const target = typeof args?.path === 'string' ? args.path.trim() : '';
+        if (!target) throw new Error('path 不能为空。');
+        const commands = ctx.get('commands');
+        if (!commands) return { text: '这个部署没有 commands 服务。' };
+        const prompt = buildReviewPrompt(target, args?.focus, args?.maxFindings);
+        const roundStartedAt = Date.now();
+        let result;
+        try {
+          result = await commands.execute(exec.agent, `/codebuddy ${prompt}`, [], exec.signal);
+        } catch (error) {
+          return { text: `调用 /codebuddy 失败：${error instanceof Error ? error.message : String(error)}` };
+        }
+        if (!result) return { text: '命令没解析成功——确认 dsh-connect-workbuddy 的 cliBridge 已打开、/codebuddy 存在。' };
+        const failure = result.result?.kind === 'error' ? String(result.result.text ?? '') : '';
+        if (failure) return { text: `这一轮失败：${failure}` };
+        const sessionMatch = /session_id=([0-9a-zA-Z-]+)/.exec(String(result.result?.text ?? ''));
+        if (!sessionMatch) return { text: '这一轮没有拿到会话 id，核对不可用；结论仍会回注到对话。' };
+        bridge.recordRun(sessionMatch[1], roundStartedAt, prompt);
+        let check = '';
+        try {
+          check = verifyRound(bridge.collabDir, { run: 1, cwd: bridge.defaults.cwd }).text;
+        } catch (error) {
+          check = `核对失败：${error instanceof Error ? error.message : String(error)}`;
+        }
+        return { text: `审查已跑完，结论会作为消息回注到对话。\n\n—— 核对 ——\n${check}` };
+      },
+    }),
+  );
+
+  ctx.effect(() =>
+    ctx.tools.register({
       description: '调试用：打印当前会话 Agent 对象上和唤醒相关的方法签名，用来确认 followup/inject 的调用方式。',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       output: {

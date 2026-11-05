@@ -1,5 +1,11 @@
 # Changelog
 
+## 未发布（0.3 开发中）
+
+- `workbuddy_review(path, focus?, maxFindings?)`：只读审查固化成工具，固定模板 + 自动 UNREAD 核对。
+- verify 新增 UNREAD 判定：纯审查轮核对该读的文件到底读没读。
+- 审查轮记录 prompt 与 `requested` 文件列表，供 UNREAD 使用。
+
 ## 0.2.0 — 2026-11-05
 
 - **改名**：`@local/dsh-workbuddy-bridge` → `dsh-codebuddy-bridge`（对外的名字和实际干活的引擎对齐）。
