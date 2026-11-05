@@ -12,3 +12,4 @@ node_modules/
 .DS_Store
 DIAGNOSIS.md
 push-to-github.cmd
+PLAN-0.3.md
