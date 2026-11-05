@@ -429,7 +429,8 @@ function collectActions(events, window) {
       name,
       tag: tagForTool(name),
       ts,
-      path: MODIFY_TOOLS.has(name) ? toolFilePath(event) : '',
+      // Reads matter too: a review round proves it read the file it criticises.
+      path: MODIFY_TOOLS.has(name) || name === 'Read' ? toolFilePath(event) : '',
       callId: typeof event.callId === 'string' ? event.callId : undefined,
       status: typeof event.status === 'string' ? event.status : undefined,
     });
@@ -535,6 +536,24 @@ function extractClaims(summary, cwd) {
     }
   }
   return claims;
+}
+
+/**
+ * Files the task explicitly asked to look at, e.g. a `文件：<path>` line in the
+ * review prompt. Only those lines count: a mention of some other file ("don't
+ * touch index.js") must not turn into an UNREAD.
+ */
+function extractPromptPaths(prompt, cwd) {
+  const found = new Map();
+  if (typeof prompt !== 'string' || !prompt) return found;
+  for (const line of prompt.split(/\r?\n/)) {
+    const match = /^\s*(?:文件|路径|path|files?)\s*[:：]\s*(.+)$/i.exec(line);
+    if (!match) continue;
+    for (const [key, item] of extractPaths(match[1], cwd)) {
+      if (!found.has(key)) found.set(key, item);
+    }
+  }
+  return found;
 }
 
 /** Files whose mtime moved during the round, walking the workspace only. */
@@ -704,7 +723,7 @@ export function verifyRound(dir, options = {}) {
 
   const modified = new Map();
   for (const action of actions) {
-    if (!action.path) continue;
+    if (!MODIFY_TOOLS.has(action.name) || !action.path) continue;
     const key = pathKey(action.path, cwd);
     if (!modified.has(key)) modified.set(key, { display: displayPath(action.path, cwd), actions: [] });
     modified.get(key).actions.push(action);
@@ -791,6 +810,21 @@ export function verifyRound(dir, options = {}) {
       '摘要声称改了它，但这一轮没有任何写操作指向这个文件',
       facts.exists ? `${bytes(facts.size)} · mtime ${new Date(facts.mtime).toLocaleString('zh-CN')}` : '文件也不存在',
     ]);
+  }
+
+  // Review rounds leave no writes to compare, so the check is "did it read what
+  // it was asked to review". The claimed set is the prompt's `文件：` lines when
+  // present, otherwise whatever the summary names.
+  if (modified.size === 0) {
+    const reads = new Set(
+      actions.filter((action) => action.name === 'Read' && action.path).map((action) => pathKey(action.path, cwd)),
+    );
+    const fromPrompt = extractPromptPaths(record.prompt, cwd);
+    const claimed = fromPrompt.size > 0 ? fromPrompt : extractPaths(record.summary ?? '', cwd);
+    for (const [key, item] of claimed) {
+      if (reads.has(key)) continue;
+      push('FAIL', item.display, ['UNREAD：这一轮声称审了它，但没有任何 Read 指向这个文件']);
+    }
   }
 
   // Files that moved on their own: either another process, or it hid a write.
@@ -1334,7 +1368,7 @@ class WorkBuddyBridge {
    * `roundStartedAt` marks where this round began — a CLI session is reused, so
    * its transcript also holds the earlier rounds and verification needs a cut.
    */
-  recordRun(sessionId, roundStartedAt) {
+  recordRun(sessionId, roundStartedAt, prompt) {
     const parsed = parseCliSession(sessionId);
     if (!parsed) return;
     try {
@@ -1343,6 +1377,8 @@ class WorkBuddyBridge {
         at: Date.now(),
         ...parsed,
         ...(typeof roundStartedAt === 'number' ? { roundStartedAt } : {}),
+        // The prompt is what tells verification which files were asked for.
+        ...(typeof prompt === 'string' && prompt.trim() ? { prompt: prompt.trim().slice(0, 800) } : {}),
       };
       writeFileSync(join(this.collabDir, 'last-run.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
       appendFileSync(join(this.collabDir, 'runs.jsonl'), `${JSON.stringify(record)}\n`, 'utf8');
@@ -2085,7 +2121,7 @@ export function apply(ctx, config = {}) {
         if (failure) return { text: `CodeBuddy 这一轮失败：${failure}` };
         const output = String(result.result?.text ?? '');
         const sessionMatch = /session_id=([0-9a-zA-Z-]+)/.exec(output);
-        if (sessionMatch) bridge.recordRun(sessionMatch[1], roundStartedAt);
+        if (sessionMatch) bridge.recordRun(sessionMatch[1], roundStartedAt, prompt);
         return {
           text: [
             '已交给 /codebuddy，它跑完会把结论作为消息回注到本会话（界面上能看到），运行中看输入框下方的胶囊。',

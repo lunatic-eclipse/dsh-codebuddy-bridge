@@ -28,7 +28,7 @@ const { verifyRound } = await import('../index.js');
 
 const T0 = Date.now() - 600000;
 
-function round(name, { summary, withWrite = true, withBackup = true, existedAtTrack = true, content, mtime }) {
+function round(name, { summary, withWrite = true, withBackup = true, existedAtTrack = true, content, mtime, prompt, reads = [] }) {
   const dir = mkdtempSync(join(tmpdir(), `cbb-${name}-`));
   const file = join(dir, 'note.md');
   writeFileSync(file, content ?? '改后的内容，比原来多一行\n', 'utf8');
@@ -45,6 +45,17 @@ function round(name, { summary, withWrite = true, withBackup = true, existedAtTr
       snapshot: { trackedFileBackups: { 'note.md': backup } },
     },
   ];
+  for (const [index, name_] of reads.entries()) {
+    const target = join(dir, name_);
+    writeFileSync(target, '被读的文件\n', 'utf8');
+    events.push({
+      type: 'function_call',
+      name: 'Read',
+      callId: `read-${index}`,
+      timestamp: T0 + 1500 + index,
+      arguments: JSON.stringify({ file_path: target }),
+    });
+  }
   if (withWrite) {
     events.push({
       type: 'function_call',
@@ -71,6 +82,7 @@ function round(name, { summary, withWrite = true, withBackup = true, existedAtTr
       sessionId: name,
       file: transcript,
       summary,
+      ...(prompt ? { prompt } : {}),
       startedAt: T0,
       endedAt: T0 + 3000,
       steps: [],
@@ -114,6 +126,40 @@ test('a read-only round has nothing to verify', () => {
   const text = verifyRound(round('readonly', { summary: '只读审查，没有改动', withWrite: false }), {}).text;
   assert.match(text, /无可核对项/);
   assert.match(text, /实际写入：0 个文件/);
+});
+
+test('review round that never read the requested file → FAIL (UNREAD)', () => {
+  const dir = round('unread', {
+    summary: '审了 b.md，没发现可报的问题',
+    withWrite: false,
+    prompt: '任务：只读审查。\n文件：a.md\n不要改任何文件。',
+    reads: ['b.md'],
+  });
+  const text = verifyRound(dir, {}).text;
+  assert.match(text, /\[FAIL\] a\.md/);
+  assert.match(text, /UNREAD/);
+});
+
+test('review round that read the requested file → nothing to flag', () => {
+  const dir = round('reviewed', {
+    summary: '读完了，没有可报的问题',
+    withWrite: false,
+    prompt: '任务：只读审查。\n文件：a.md',
+    reads: ['a.md'],
+  });
+  const text = verifyRound(dir, {}).text;
+  assert.doesNotMatch(text, /UNREAD/);
+  assert.match(text, /无可核对项/);
+});
+
+test('case and separator differences still count as read', () => {
+  const dir = round('casefold', {
+    summary: '读完了',
+    withWrite: false,
+    prompt: '任务：只读审查。\n文件：A.MD',
+    reads: ['a.md'],
+  });
+  assert.doesNotMatch(verifyRound(dir, {}).text, /UNREAD/);
 });
 
 test('rounds of one CLI session do not bleed into each other', () => {
