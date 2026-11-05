@@ -5,6 +5,14 @@
   "description": "把本机 CodeBuddy CLI（WorkBuddy 桌面版内置的那套引擎）接进 DSH：派活、结论回注、逐轮核对它到底改了什么。",
   "author": "donghao",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lunatic-eclipse/dsh-codebuddy-bridge.git"
+  },
+  "homepage": "https://github.com/lunatic-eclipse/dsh-codebuddy-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/lunatic-eclipse/dsh-codebuddy-bridge/issues"
+  },
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
