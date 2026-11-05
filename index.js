@@ -361,7 +361,7 @@ const MODIFY_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 
 /** Loose candidate paths in a summary; existence/extension filters come after. */
 const PATH_RE =
-  /(?:[A-Za-z]:[\\/][^\s`'"“”‘’，。；、）)\]]+|[A-Za-z0-9_.\-\\/]+\.(?:md|mjs|cjs|js|json|jsonl|ya?ml|txt|cmd|ps1|ts|tsx|jsx|html|css|py|toml|xml|svg|png|sh))/g;
+  /(?:[A-Za-z]:[\\/][^\s`'"“”‘’，。；、）)\]]+|[A-Za-z0-9_.\-\\/]+\.[A-Za-z0-9]{1,8})/gi;
 
 /** Reads as "I changed something"; advice like "改：第 25 行…" must not match. */
 const CLAIM_VERB_RE =
@@ -514,7 +514,25 @@ function extractPaths(text, cwd) {
       .replace(/\\+$/, '');
     if (!raw || raw.length < 3) continue;
     if (!/\.[A-Za-z0-9]{1,8}$/.test(raw) && !/^[A-Za-z]:[\\/]/.test(raw)) continue;
-    const absolute = isAbsolute(raw) ? raw : resolvePath(cwd ?? process.cwd(), raw);
+    const absolute = resolvePath(isAbsolute(raw) ? raw : resolvePath(cwd ?? process.cwd(), raw));
+    const key = pathKey(absolute, cwd);
+    if (!found.has(key)) found.set(key, { display: displayPath(absolute, cwd), absolute });
+  }
+  return found;
+}
+
+/** Split one "文件：a.md、b.md" line into resolved paths (spaces allowed). */
+function pathsFromTokens(text, cwd) {
+  const found = new Map();
+  for (const token of String(text).split(/[、,，;；]/)) {
+    const raw = token
+      .trim()
+      .replace(/^[`'"“”‘’（(\[]+/g, '')
+      .replace(/[`'"“”‘’)\]）】，。；、]+$/g, '')
+      .trim();
+    if (!raw) continue;
+    if (!/[\\/]/.test(raw) && !/\.[A-Za-z0-9]{1,8}$/.test(raw)) continue;
+    const absolute = resolvePath(isAbsolute(raw) ? raw : resolvePath(cwd ?? process.cwd(), raw));
     const key = pathKey(absolute, cwd);
     if (!found.has(key)) found.set(key, { display: displayPath(absolute, cwd), absolute });
   }
@@ -539,17 +557,35 @@ function extractClaims(summary, cwd) {
 }
 
 /**
- * Files the task explicitly asked to look at, e.g. a `文件：<path>` line in the
- * review prompt. Only those lines count: a mention of some other file ("don't
- * touch index.js") must not turn into an UNREAD.
+ * Files the task explicitly asked to look at, e.g. `文件：<path>` — inline or at
+ * line start. Only those markers count: "don't touch index.js" must not turn
+ * into an UNREAD.
  */
+const FILE_MARKER_RE = /(?:文件|路径|path|files?)\s*[:：]\s*(.+)$/i;
+
 function extractPromptPaths(prompt, cwd) {
   const found = new Map();
   if (typeof prompt !== 'string' || !prompt) return found;
   for (const line of prompt.split(/\r?\n/)) {
-    const match = /^\s*(?:文件|路径|path|files?)\s*[:：]\s*(.+)$/i.exec(line);
+    const match = FILE_MARKER_RE.exec(line);
     if (!match) continue;
-    for (const [key, item] of extractPaths(match[1], cwd)) {
+    for (const [key, item] of pathsFromTokens(match[1], cwd)) {
+      if (!found.has(key)) found.set(key, item);
+    }
+  }
+  return found;
+}
+
+/** Paths the summary says it read/checked, with advice ("建议看 X") excluded. */
+const REVIEW_VERB_RE = /(审|读|看|检查|核对|review)/i;
+const ADVICE_RE = /(建议|应该|可以|需要|待|如果|若|别|不要)/;
+
+function extractMentionedPaths(summary, cwd) {
+  const found = new Map();
+  if (typeof summary !== 'string' || !summary) return found;
+  for (const sentence of summary.split(/[。\n]/)) {
+    if (!REVIEW_VERB_RE.test(sentence) || ADVICE_RE.test(sentence)) continue;
+    for (const [key, item] of extractPaths(sentence, cwd)) {
       if (!found.has(key)) found.set(key, item);
     }
   }
@@ -616,7 +652,18 @@ function resolveRound(dir, options = {}) {
   if (typeof options.session === 'string' && options.session.trim()) {
     const sessionId = options.session.trim();
     const parsed = parseCliSession(sessionId) ?? findSessionByPrefix(sessionId);
-    return parsed ? { at: Date.now(), ...parsed } : undefined;
+    if (!parsed) return undefined;
+    // The transcript knows nothing about the prompt, so carry it over from the
+    // latest recorded round of the same session (UNREAD depends on it).
+    const prior = readRunRecords(dir, 50)
+      .filter((run) => run.sessionId === parsed.sessionId)
+      .pop();
+    return {
+      at: Date.now(),
+      ...(prior?.prompt ? { prompt: prior.prompt } : {}),
+      ...(Array.isArray(prior?.requested) ? { requested: prior.requested } : {}),
+      ...parsed,
+    };
   }
   const runs = readRunRecords(dir, 50);
   if (runs.length === 0) return undefined;
@@ -813,16 +860,34 @@ export function verifyRound(dir, options = {}) {
   }
 
   // Review rounds leave no writes to compare, so the check is "did it read what
-  // it was asked to review". The claimed set is the prompt's `文件：` lines when
-  // present, otherwise whatever the summary names.
-  if (modified.size === 0) {
+  // it was asked to review". Claimed = files the prompt named ∪ files the summary
+  // says it read (advice excluded). A Grep/Glob-only round is downgraded to WARN:
+  // searching is not reading, but it is not proof of a fake review either.
+  const requested = new Map();
+  if (Array.isArray(record.requested)) {
+    for (const display of record.requested) {
+      if (typeof display !== 'string' || !display) continue;
+      const absolute = resolvePath(cwd, display);
+      requested.set(pathKey(absolute, cwd), { display, absolute });
+    }
+  }
+  if (requested.size === 0) {
+    for (const [key, item] of extractPromptPaths(record.prompt, cwd)) requested.set(key, item);
+  }
+  if (modified.size === 0 || requested.size > 0) {
     const reads = new Set(
-      actions.filter((action) => action.name === 'Read' && action.path).map((action) => pathKey(action.path, cwd)),
+      actions
+        .filter((action) => (action.name === 'Read' || action.name === 'ReadImage') && action.path)
+        .map((action) => pathKey(action.path, cwd)),
     );
-    const fromPrompt = extractPromptPaths(record.prompt, cwd);
-    const claimed = fromPrompt.size > 0 ? fromPrompt : extractPaths(record.summary ?? '', cwd);
+    const searched = actions.some((action) => action.name === 'Grep' || action.name === 'Glob');
+    const claimed = new Map([...requested, ...extractMentionedPaths(record.summary ?? '', cwd)]);
     for (const [key, item] of claimed) {
       if (reads.has(key)) continue;
+      if (searched) {
+        push('WARN', item.display, ['UNREAD?：没看到 Read 它，但这一轮用了 Grep/Glob，可能用搜索核对过']);
+        continue;
+      }
       push('FAIL', item.display, ['UNREAD：这一轮声称审了它，但没有任何 Read 指向这个文件']);
     }
   }
@@ -1373,12 +1438,18 @@ class WorkBuddyBridge {
     if (!parsed) return;
     try {
       mkdirSync(this.collabDir, { recursive: true });
+      // Resolve the "文件：" lines now, while the prompt is whole: truncating it
+      // later would silently drop every file named after the cut.
+      const requested =
+        typeof prompt === 'string' && prompt.trim()
+          ? [...extractPromptPaths(prompt, this.defaults.cwd).values()].map((item) => item.display)
+          : [];
       const record = {
         at: Date.now(),
         ...parsed,
         ...(typeof roundStartedAt === 'number' ? { roundStartedAt } : {}),
-        // The prompt is what tells verification which files were asked for.
-        ...(typeof prompt === 'string' && prompt.trim() ? { prompt: prompt.trim().slice(0, 800) } : {}),
+        ...(typeof prompt === 'string' && prompt.trim() ? { prompt: prompt.trim().slice(0, 4000) } : {}),
+        ...(requested.length > 0 ? { requested } : {}),
       };
       writeFileSync(join(this.collabDir, 'last-run.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
       appendFileSync(join(this.collabDir, 'runs.jsonl'), `${JSON.stringify(record)}\n`, 'utf8');

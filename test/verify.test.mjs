@@ -10,6 +10,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { dirname } from 'node:path';
 import { join } from 'node:path';
 
 // index.js resolves the CLI's backup store from USERPROFILE at import time, so
@@ -47,6 +48,7 @@ function round(name, { summary, withWrite = true, withBackup = true, existedAtTr
   ];
   for (const [index, name_] of reads.entries()) {
     const target = join(dir, name_);
+    mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, '被读的文件\n', 'utf8');
     events.push({
       type: 'function_call',
@@ -152,12 +154,34 @@ test('review round that read the requested file → nothing to flag', () => {
   assert.match(text, /无可核对项/);
 });
 
-test('case and separator differences still count as read', () => {
-  const dir = round('casefold', {
+test('uppercase extensions are extracted, and case differences still count as read', () => {
+  // Extraction must actually find A.MD — otherwise the "no UNREAD" case below
+  // would pass for the wrong reason (empty claim set).
+  const missed = round('case-miss', {
+    summary: '审完了',
+    withWrite: false,
+    prompt: '任务：只读审查。\n文件：A.MD',
+    reads: ['b.md'],
+  });
+  const missedText = verifyRound(missed, {}).text;
+  assert.match(missedText, /\[FAIL\] A\.MD/);
+  assert.match(missedText, /UNREAD/);
+
+  const ok = round('case-ok', {
     summary: '读完了',
     withWrite: false,
     prompt: '任务：只读审查。\n文件：A.MD',
     reads: ['a.md'],
+  });
+  assert.doesNotMatch(verifyRound(ok, {}).text, /UNREAD/);
+});
+
+test('separator differences count as the same file', () => {
+  const dir = round('sep', {
+    summary: '读完了',
+    withWrite: false,
+    prompt: '任务：只读审查。\n文件：src\\a.md',
+    reads: ['src/a.md'],
   });
   assert.doesNotMatch(verifyRound(dir, {}).text, /UNREAD/);
 });
