@@ -807,6 +807,14 @@ export function verifyRound(dir, options = {}) {
     else counts.warn += 1;
   };
 
+  // A round that promised to be read-only has one more way to fail: it wrote.
+  if (options.expectReadOnly === true) {
+    for (const [, entry] of modified) {
+      const tools = [...new Set(entry.actions.map((action) => action.name))].join('+');
+      push('FAIL', entry.display, [`只读轮发生了写操作（${tools}）——审查轮不该改文件`]);
+    }
+  }
+
   for (const [key, entry] of modified) {
     const absolute = resolvePath(cwd, entry.display);
     const facts = fileFacts(absolute);
@@ -2129,11 +2137,18 @@ export function apply(ctx, config = {}) {
         if (!bridge.isEnabled(exec.agent?.id)) {
           return { text: '协作模式没开：先在输入框下方点一下「CodeBuddy 协作」。' };
         }
-        const target = typeof args?.path === 'string' ? args.path.trim() : '';
+        // The path ends up inside a command line: strip newlines and leading
+        // dashes so a stray "--edit" cannot flip the read-only contract.
+        const clean = (value) =>
+          String(value ?? '')
+            .replace(/[\r\n]+/g, ' ')
+            .replace(/^[-\s]+/, '')
+            .trim();
+        const target = clean(args?.path);
         if (!target) throw new Error('path 不能为空。');
         const commands = ctx.get('commands');
         if (!commands) return { text: '这个部署没有 commands 服务。' };
-        const prompt = buildReviewPrompt(target, args?.focus, args?.maxFindings);
+        const prompt = buildReviewPrompt(target, args?.focus ? clean(args.focus) : '', args?.maxFindings);
         const roundStartedAt = Date.now();
         let result;
         try {
@@ -2146,10 +2161,17 @@ export function apply(ctx, config = {}) {
         if (failure) return { text: `这一轮失败：${failure}` };
         const sessionMatch = /session_id=([0-9a-zA-Z-]+)/.exec(String(result.result?.text ?? ''));
         if (!sessionMatch) return { text: '这一轮没有拿到会话 id，核对不可用；结论仍会回注到对话。' };
-        bridge.recordRun(sessionMatch[1], roundStartedAt, prompt);
+        const record = bridge.recordRun(sessionMatch[1], roundStartedAt, prompt);
+        if (!record) {
+          return { text: '审查跑完了，但这一轮的记录没能落库，核对不可用——别把它的结论直接当证据。' };
+        }
         let check = '';
         try {
-          check = verifyRound(bridge.collabDir, { run: 1, cwd: bridge.defaults.cwd }).text;
+          check = verifyRound(bridge.collabDir, {
+            run: 1,
+            cwd: bridge.defaults.cwd,
+            expectReadOnly: true,
+          }).text;
         } catch (error) {
           check = `核对失败：${error instanceof Error ? error.message : String(error)}`;
         }
@@ -2160,6 +2182,7 @@ export function apply(ctx, config = {}) {
 
   ctx.effect(() =>
     ctx.tools.register({
+      name: 'workbuddy_probe',
       description: '调试用：打印当前会话 Agent 对象上和唤醒相关的方法签名，用来确认 followup/inject 的调用方式。',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       output: {

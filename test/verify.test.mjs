@@ -25,7 +25,7 @@ mkdirSync(backupDir, { recursive: true });
 const BEFORE = '改前的内容\n';
 writeFileSync(join(backupDir, BACKUP), BEFORE, 'utf8');
 
-const { verifyRound, buildReviewPrompt } = await import('../index.js');
+const { verifyRound, buildReviewPrompt, apply } = await import('../index.js');
 
 const T0 = Date.now() - 600000;
 
@@ -206,6 +206,17 @@ test('forward slashes in the prompt still identify the same file', () => {
   assert.doesNotMatch(verifyRound(ok, {}).text, /UNREAD/);
 });
 
+test('a review round that writes anything fails the read-only contract', () => {
+  const dir = round('readonly-write', {
+    summary: '审完了',
+    withWrite: true,
+    prompt: '文件：note.md',
+  });
+  const text = verifyRound(dir, { expectReadOnly: true }).text;
+  assert.match(text, /只读轮发生了写操作/);
+  assert.match(text, /\[FAIL\] note\.md/);
+});
+
 test('the review prompt is fixed: read-only, capped, and short', () => {
   const prompt = buildReviewPrompt('a.js', '', undefined);
   assert.match(prompt, /只读审查/);
@@ -266,6 +277,89 @@ test('rounds of one CLI session do not bleed into each other', () => {
   const second = verifyRound(dir, { run: 1 }).text;
   assert.match(second, /实际写入：0 个文件/);
   assert.match(second, /无可核对项/);
+});
+
+/**
+ * DSH serializes every registered tool spec into the `request/header` session
+ * event. `snapshotJsonValue()` requires a *lossless* JSON value: undefined,
+ * functions, symbols, bigint, NaN/Infinity, -0, class instances and cycles all
+ * make the append fail with "session event \"request/header\" carries
+ * non-JSON-serializable data" — which kills every turn after a restart.
+ */
+function isJsonValue(value, ancestors = new Set()) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return true;
+  if (typeof value === 'number') return Number.isFinite(value) && !Object.is(value, -0);
+  if (typeof value !== 'object') return false;
+  if (ancestors.has(value)) return false;
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) return false;
+    if (Reflect.ownKeys(value).length !== value.length + 1) return false;
+    ancestors.add(value);
+    const ok = value.every((entry) => isJsonValue(entry, ancestors));
+    ancestors.delete(value);
+    return ok;
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return false;
+  if (Object.getOwnPropertySymbols(value).some((key) => Object.prototype.propertyIsEnumerable.call(value, key))) return false;
+  ancestors.add(value);
+  for (const key of Object.keys(value)) {
+    if (!isJsonValue(value[key], ancestors)) {
+      ancestors.delete(value);
+      return false;
+    }
+  }
+  ancestors.delete(value);
+  return true;
+}
+
+test('every registered tool spec survives the request/header JSON snapshot', () => {
+  const specs = [];
+  const disposers = [];
+  const ctx = {
+    get: () => undefined,
+    on: () => () => {},
+    set: () => {},
+    effect: (fn) => {
+      const dispose = fn();
+      if (typeof dispose === 'function') disposers.push(dispose);
+      return () => {};
+    },
+    tools: {
+      register: (spec) => {
+        specs.push(spec);
+        return () => {};
+      },
+    },
+  };
+  const collabDir = join(home, 'bridge-tools');
+  mkdirSync(collabDir, { recursive: true });
+
+  try {
+    apply(ctx, { collabDir, cwd: home, watchMs: 60_000 });
+    assert.ok(specs.length >= 8, `expected the tool registrations, got ${specs.length}`);
+    for (const spec of specs) {
+      const label = spec.name ?? '<unnamed tool>';
+      assert.equal(typeof spec.name, 'string', `${label}: missing name puts undefined into request/header`);
+      assert.ok(spec.name.length > 0, `${label}: empty name`);
+      for (const field of ['name', 'description', 'parameters', 'timeoutMs']) {
+        if (field in spec) {
+          assert.ok(isJsonValue(spec[field]), `${label}.${field} is not losslessly JSON-serializable`);
+        }
+      }
+      if (spec.output && 'schema' in spec.output) {
+        assert.ok(isJsonValue(spec.output.schema), `${label}.output.schema is not losslessly JSON-serializable`);
+      }
+    }
+  } finally {
+    for (const dispose of disposers) {
+      try {
+        dispose();
+      } catch {
+        /* cleanup must not mask the assertion */
+      }
+    }
+  }
 });
 
 after(() => {
