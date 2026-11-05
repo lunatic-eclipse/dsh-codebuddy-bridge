@@ -143,6 +143,16 @@ test('review round that never read the requested file → FAIL (UNREAD)', () => 
 });
 
 test('review round that read the requested file → nothing to flag', () => {
+  // Negative control first: without it, a broken extractor (empty claim set)
+  // would also produce "no UNREAD" and the test would pass for the wrong reason.
+  const missed = round('reviewed-miss', {
+    summary: '读完了',
+    withWrite: false,
+    prompt: '任务：只读审查。\n文件：a.md',
+    reads: ['b.md'],
+  });
+  assert.match(verifyRound(missed, {}).text, /\[FAIL\] a\.md/);
+
   const dir = round('reviewed', {
     summary: '读完了，没有可报的问题',
     withWrite: false,
@@ -176,14 +186,24 @@ test('uppercase extensions are extracted, and case differences still count as re
   assert.doesNotMatch(verifyRound(ok, {}).text, /UNREAD/);
 });
 
-test('separator differences count as the same file', () => {
-  const dir = round('sep', {
+test('forward slashes in the prompt still identify the same file', () => {
+  // Positive control: a forward-slash prompt must be extracted at all,
+  // otherwise the "no UNREAD" half below would pass with an empty claim set.
+  const missed = round('sep-miss', {
+    summary: '读完了',
+    withWrite: false,
+    prompt: '任务：只读审查。\n文件：src/a.md',
+    reads: ['b.md'],
+  });
+  assert.match(verifyRound(missed, {}).text, /\[FAIL\] src\\a\.md/);
+
+  const ok = round('sep', {
     summary: '读完了',
     withWrite: false,
     prompt: '任务：只读审查。\n文件：src\\a.md',
     reads: ['src/a.md'],
   });
-  assert.doesNotMatch(verifyRound(dir, {}).text, /UNREAD/);
+  assert.doesNotMatch(verifyRound(ok, {}).text, /UNREAD/);
 });
 
 test('rounds of one CLI session do not bleed into each other', () => {
