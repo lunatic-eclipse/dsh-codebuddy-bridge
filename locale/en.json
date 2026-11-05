@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "CodeBuddy Bridge",
+    "description": "Hand work from DSH to the local CodeBuddy CLI (the engine bundled with WorkBuddy), get the result back in the conversation, and verify per round what actually changed."
+  }
+}

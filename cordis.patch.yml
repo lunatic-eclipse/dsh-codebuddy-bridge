@@ -1,0 +1,9 @@
+# Defaults for a fresh install: nothing machine-specific here.
+# The exchange folder defaults to ~/.dsh/codebuddy-bridge (override with
+# `collabDir`), and the engine is discovered from the WorkBuddy install
+# location (override with `cliPath` or the WORKBUDDY_CLI_PATH env var).
+- insert:
+    - id: codebuddy-bridge
+      name: dsh-codebuddy-bridge
+      config:
+        permissionMode: acceptEdits

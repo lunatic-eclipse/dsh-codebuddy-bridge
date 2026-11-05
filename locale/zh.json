@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "CodeBuddy 协作桥",
+    "description": "让 DSH 把活派给本机 CodeBuddy CLI（WorkBuddy 桌面版里那套引擎），结论回注对话，并逐轮核对它到底改了什么。"
+  }
+}

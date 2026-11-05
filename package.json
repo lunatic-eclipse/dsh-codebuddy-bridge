@@ -1,0 +1,77 @@
+{
+  "name": "dsh-codebuddy-bridge",
+  "displayName": "CodeBuddy Bridge",
+  "version": "0.2.0",
+  "description": "把本机 CodeBuddy CLI（WorkBuddy 桌面版内置的那套引擎）接进 DSH：派活、结论回注、逐轮核对它到底改了什么。",
+  "author": "donghao",
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "codebuddy",
+    "workbuddy",
+    "agent-collaboration",
+    "code-review"
+  ],
+  "type": "module",
+  "main": "index.js",
+  "icon": "icon.svg",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.0-rc.1 <0.3.0-0"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "dsh-connect-workbuddy": ">=5.0.0",
+    "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "dsh-connect-workbuddy": {
+      "optional": true,
+      "reason": "The /codebuddy relay route comes from that plugin; without it only the direct engine path and the verifier work."
+    }
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg",
+    "README.md",
+    "README.en.md",
+    "USAGE.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "screenshots.json",
+    "docs/assets",
+    "test"
+  ],
+  "scripts": {
+    "test": "node test/verify.test.mjs",
+    "prepublishOnly": "npm test && node --check index.js && node --check client.js"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  }
+}

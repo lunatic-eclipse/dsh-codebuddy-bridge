@@ -1,0 +1,14 @@
+# internal notes — not part of the published plugin
+HANDOFF.md
+NEXT.md
+VERIFY-PLAN.md
+MARKET.md
+cordis.patch.yml.profile-backup
+
+# local scratch
+node_modules/
+.tmp/
+*.tgz
+.DS_Store
+DIAGNOSIS.md
+push-to-github.cmd
