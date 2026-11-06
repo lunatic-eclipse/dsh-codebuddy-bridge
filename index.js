@@ -1465,7 +1465,7 @@ class WorkBuddyBridge {
    */
   recordRun(sessionId, roundStartedAt, prompt) {
     const parsed = parseCliSession(sessionId);
-    if (!parsed) return;
+    if (!parsed) return undefined;
     try {
       mkdirSync(this.collabDir, { recursive: true });
       // Resolve the "文件：" lines now, while the prompt is whole: truncating it
@@ -1484,8 +1484,10 @@ class WorkBuddyBridge {
       writeFileSync(join(this.collabDir, 'last-run.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
       appendFileSync(join(this.collabDir, 'runs.jsonl'), `${JSON.stringify(record)}\n`, 'utf8');
       this.writeReportMarkdown();
+      return record;
     } catch {
       /* the panel is a convenience */
+      return undefined;
     }
   }
 
@@ -2161,7 +2163,13 @@ export function apply(ctx, config = {}) {
         if (failure) return { text: `这一轮失败：${failure}` };
         const sessionMatch = /session_id=([0-9a-zA-Z-]+)/.exec(String(result.result?.text ?? ''));
         if (!sessionMatch) return { text: '这一轮没有拿到会话 id，核对不可用；结论仍会回注到对话。' };
-        const record = bridge.recordRun(sessionMatch[1], roundStartedAt, prompt);
+        // The transcript can land a moment after the command returns; retry a
+        // few times instead of reporting "not recorded" on a race.
+        let record;
+        for (let attempt = 0; attempt < 4 && !record; attempt += 1) {
+          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 300));
+          record = bridge.recordRun(sessionMatch[1], roundStartedAt, prompt);
+        }
         if (!record) {
           return { text: '审查跑完了，但这一轮的记录没能落库，核对不可用——别把它的结论直接当证据。' };
         }
@@ -2175,7 +2183,11 @@ export function apply(ctx, config = {}) {
         } catch (error) {
           check = `核对失败：${error instanceof Error ? error.message : String(error)}`;
         }
-        return { text: `审查已跑完，结论会作为消息回注到对话。\n\n—— 核对 ——\n${check}` };
+        const conclusion = String(record.summary ?? '').trim();
+        const head = conclusion
+          ? `它的结论：\n${conclusion.slice(0, 800)}\n\n`
+          : '审查已跑完，结论会作为消息回注到对话。\n\n';
+        return { text: `${head}—— 核对 ——\n${check}` };
       },
     }),
   );

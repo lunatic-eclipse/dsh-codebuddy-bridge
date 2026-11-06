@@ -6,7 +6,7 @@
 
 ```powershell
 cd C:\Users\donghao\Documents\deepseek-harness\default-workspace\plugins\workbuddy-bridge
-node test/verify.test.mjs        # 6 例，必须全绿
+node test/verify.test.mjs        # 14 例，必须全绿
 node --check index.js; node --check client.js
 ```
 
@@ -28,7 +28,7 @@ git commit -m "feat: 一句话说清改了什么"
 - 加功能、改行为 → minor（0.3.0）
 - 破坏性改动（改工具名、改配置字段）→ major（1.0.0）
 
-四个地方要一起动：`package.json` 的 `version`、`CHANGELOG.md`、市场条目（提交后会重新跑）、如果需要再发 npm。
+两处文件要同步：`package.json` 的 `version` 和 `CHANGELOG.md`；市场条目提交后会重新跑检查，npm 按需再发。
 
 ## 市场上的状态
 
