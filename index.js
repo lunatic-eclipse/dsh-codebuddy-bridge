@@ -329,6 +329,188 @@ function readFullConclusion(file) {
   return text || undefined;
 }
 
+// --- Usage report (read-only, no quota) -------------------------------------
+//
+// The plugin deliberately keeps no credit ledger: WorkBuddy's credits live in the
+// account, not here. What it *can* report are the two facts on disk — how long
+// each round took (`runs.jsonl`) and how many tokens the CLI itself counted
+// (`usage` blocks in its transcript). Nothing is written, nothing is estimated.
+
+/** Token counts of one round, attributed by the round's own time window. */
+function readRoundUsage(file, from, to) {
+  if (!file) return undefined;
+  let raw;
+  try {
+    raw = readFileSync(file, 'utf8');
+  } catch {
+    return undefined;
+  }
+  const totals = { input: 0, output: 0, cacheRead: 0, messages: 0 };
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event?.type !== 'message' || event.role !== 'assistant') continue;
+    const usage = event?.message?.usage ?? event?.usage;
+    if (!usage) continue;
+    // A CLI session is reused across rounds, so the file holds earlier rounds
+    // too: only messages inside this round's window belong to this round.
+    if (typeof event.timestamp === 'number' && typeof from === 'number' && typeof to === 'number') {
+      if (event.timestamp < from - 1000 || event.timestamp > to + 5000) continue;
+    }
+    totals.input += Number(usage.input_tokens) || 0;
+    totals.output += Number(usage.output_tokens) || 0;
+    totals.cacheRead += Number(usage.cache_read_input_tokens) || 0;
+    totals.messages += 1;
+  }
+  return totals;
+}
+
+const ROUND_MODE_LABELS = { plan: '计划', audit: '审计', task: '任务' };
+
+function dayKey(ms) {
+  const date = new Date(ms);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function modeOf(run) {
+  return run?.mode === 'plan' || run?.mode === 'audit' ? run.mode : 'task';
+}
+
+function addUsage(target, usage) {
+  target.input += usage?.input ?? 0;
+  target.output += usage?.output ?? 0;
+  target.cacheRead += usage?.cacheRead ?? 0;
+  target.rounds += 1;
+  return target;
+}
+
+const emptyUsageBucket = () => ({ rounds: 0, durationMs: 0, input: 0, output: 0, cacheRead: 0 });
+
+/**
+ * Rounds, wall time and tokens for the last `days` days. Pure read of
+ * `runs.jsonl` + each round's transcript; the caller decides how to print it.
+ */
+export function summarizeUsage(dir, options = {}) {
+  const requested = Number(options.days);
+  const days = Number.isFinite(requested) && requested > 0 ? Math.min(30, Math.floor(requested)) : 7;
+  const now = typeof options.now === 'number' ? options.now : Date.now();
+  const since = now - days * 24 * 60 * 60 * 1000;
+
+  const rounds = [];
+  for (const run of readRunRecords(dir, 500)) {
+    const to = typeof run.at === 'number' ? run.at : typeof run.endedAt === 'number' ? run.endedAt : undefined;
+    if (typeof to !== 'number' || to < since) continue;
+    const from =
+      typeof run.roundStartedAt === 'number'
+        ? run.roundStartedAt
+        : typeof run.startedAt === 'number'
+          ? run.startedAt
+          : undefined;
+    const usage = readRoundUsage(run.file, from, to);
+    rounds.push({
+      at: to,
+      day: dayKey(to),
+      mode: modeOf(run),
+      durationMs: typeof from === 'number' ? Math.max(0, to - from) : undefined,
+      usage,
+      stepCount: typeof run.stepCount === 'number' ? run.stepCount : undefined,
+    });
+  }
+
+  const byDay = new Map();
+  const byMode = new Map();
+  const totals = emptyUsageBucket();
+  const durations = [];
+  for (const round of rounds) {
+    if (typeof round.durationMs === 'number') {
+      totals.durationMs += round.durationMs;
+      durations.push(round.durationMs);
+    }
+    addUsage(totals, round.usage);
+    const day = byDay.get(round.day) ?? emptyUsageBucket();
+    if (typeof round.durationMs === 'number') day.durationMs += round.durationMs;
+    addUsage(day, round.usage);
+    byDay.set(round.day, day);
+    const mode = byMode.get(round.mode) ?? emptyUsageBucket();
+    if (typeof round.durationMs === 'number') mode.durationMs += round.durationMs;
+    addUsage(mode, round.usage);
+    byMode.set(round.mode, mode);
+  }
+
+  durations.sort((a, b) => a - b);
+  const mid = Math.floor(durations.length / 2);
+  const medianMs =
+    durations.length === 0
+      ? undefined
+      : durations.length % 2 === 1
+        ? durations[mid]
+        : Math.round((durations[mid - 1] + durations[mid]) / 2);
+
+  return {
+    days,
+    since,
+    now,
+    rounds,
+    totals,
+    byDay: [...byDay.entries()].sort(([a], [b]) => (a < b ? 1 : -1)),
+    byMode: [...byMode.entries()].sort(([, a], [, b]) => b.rounds - a.rounds),
+    duration: { medianMs, fastestMs: durations[0], slowestMs: durations.at(-1) },
+  };
+}
+
+function formatDuration(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return '—';
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 90) return `${seconds} 秒`;
+  return `${(seconds / 60).toFixed(1)} 分钟`;
+}
+
+function formatTokens(count) {
+  const value = Number(count) || 0;
+  if (value === 0) return '0';
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
+  return String(value);
+}
+
+function usageLine(bucket) {
+  const tokens =
+    bucket.input || bucket.output ? ` · 输入 ${formatTokens(bucket.input)} / 输出 ${formatTokens(bucket.output)}` : '';
+  const cache = bucket.cacheRead ? `（缓存命中 ${formatTokens(bucket.cacheRead)}）` : '';
+  return `${bucket.rounds} 轮 · ${formatDuration(bucket.durationMs)}${tokens}${cache}`;
+}
+
+/** Human-readable report; kept separate so tests can pin the numbers only. */
+export function renderUsageReport(summary) {
+  if (!summary || summary.rounds.length === 0) {
+    return `用量：近 ${summary?.days ?? 7} 天没有桥接轮次。派一轮活之后再看。`;
+  }
+  const lines = [
+    `用量 · 近 ${summary.days} 天（${summary.rounds.length} 轮，${new Date(summary.now).toLocaleString('zh-CN')} 统计）`,
+    '按天：',
+  ];
+  for (const [day, bucket] of summary.byDay) lines.push(`  ${day}  ${usageLine(bucket)}`);
+  lines.push('按模式：');
+  for (const [mode, bucket] of summary.byMode) lines.push(`  ${ROUND_MODE_LABELS[mode] ?? mode}  ${usageLine(bucket)}`);
+  const { medianMs, fastestMs, slowestMs } = summary.duration;
+  if (medianMs !== undefined) {
+    lines.push(
+      `单轮耗时：中位数 ${formatDuration(medianMs)} · 最快 ${formatDuration(fastestMs)} · 最慢 ${formatDuration(slowestMs)}`,
+    );
+  }
+  lines.push(
+    'token 由 CLI 转录按每轮起止时间切窗统计，不落盘、不换算积分；' +
+      '积分只在 WorkBuddy 账号里，倍率见当前模型的 creditMultiplier（hy4free 为 0）。',
+  );
+  return lines.join('\n');
+}
+
 // --- Plan rounds (0.3, after M3) --------------------------------------------
 //
 // A plan round answers "what should we do", so its conclusion is the deliverable.
@@ -2517,6 +2699,35 @@ export function apply(ctx, config = {}) {
           });
         } catch (error) {
           return { text: `核对失败：${error instanceof Error ? error.message : String(error)}` };
+        }
+      },
+    }),
+  );
+
+  ctx.effect(() =>
+    ctx.tools.register({
+      name: 'workbuddy_usage',
+      description:
+        '只读用量报表：近 N 天的桥接轮数、墙钟耗时（按天/按模式）、以及每轮 CLI 自己统计的 token。' +
+        '不调引擎、不花额度、不写文件；积分不在本地，本工具也不换算积分。',
+      parameters: {
+        type: 'object',
+        properties: {
+          days: { type: 'integer', description: '可选：统计最近几天，1–30，默认 7。' },
+        },
+        additionalProperties: false,
+      },
+      output: {
+        schema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+        render(_args, value) {
+          return [{ type: 'text', text: value.text }];
+        },
+      },
+      async execute(args) {
+        try {
+          return { text: renderUsageReport(summarizeUsage(bridge.collabDir, { days: args?.days, now: Date.now() })) };
+        } catch (error) {
+          return { text: `统计失败：${error instanceof Error ? error.message : String(error)}` };
         }
       },
     }),

@@ -6,10 +6,11 @@
 
 ```powershell
 cd C:\Users\donghao\Documents\deepseek-harness\default-workspace\plugins\workbuddy-bridge
-npm test                         # = 下面三套，35 例，必须全绿
+npm test                         # = 下面四套，41 例，必须全绿
 node test/verify.test.mjs        # 15 例，核对判定
 node test/throttle.test.mjs      # 9 例，节流（含 1.2 秒真实窗口那条）
 node test/plan.test.mjs          # 11 例，计划模式
+node test/usage.test.mjs         # 6 例，用量报表（含复用会话不重复计数）
 node --check index.js; node --check client.js
 ```
 
@@ -78,7 +79,7 @@ npm publish                     # package.json 里 publishConfig 已指向官方
 
 必须做，缺一不发：
 
-1. 在**要发布的那个提交**上跑三套测试，全绿（verify 15 / throttle 9 / plan 11）；
+1. 在**要发布的那个提交**上跑四套测试，全绿（verify 15 / throttle 9 / plan 11 / usage 6）；
 2. `node --check index.js && node --check client.js`；
 3. `package.json` 的 `version` 与 `CHANGELOG.md` 的最新标题一致；
 4. 动了节流或计划模式时，顺手在真机验一次：`limits.json` 跨重启保留、`plans\` 里那份 md 末尾完整

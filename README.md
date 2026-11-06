@@ -60,6 +60,7 @@ dsh plugin --profile web add github:<owner>/<repo>
 | `workbuddy_relay(prompt, edit?, mode?)` | 代敲 `/codebuddy`，结论回注对话（需要 `dsh-connect-workbuddy`）；`mode="plan"` 是只读规划 |
 | `workbuddy_review(path, focus?, maxFindings?)` | 只读审查一个文件：固定模板 + 自动核对它读没读、有没有写 |
 | `workbuddy_verify(run?, session?)` | 核对某轮改没改：PASS/FAIL/WARN + 证据；不花额度 |
+| `workbuddy_usage(days?)` | 只读用量报表：近 N 天轮数、耗时（按天/按模式）、每轮 token；不花额度 |
 | `workbuddy_read(turns?, session?)` | 读 WorkBuddy 桌面版自己的会话记录 |
 | `workbuddy_status()` / `workbuddy_close()` | 状态与会话管理 |
 | `workbuddy_dispatch(task)` + `/dsh-handoff` | 老的文件交接兜底通道 |
