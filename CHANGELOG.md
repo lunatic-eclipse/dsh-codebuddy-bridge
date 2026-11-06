@@ -2,6 +2,12 @@
 
 ## 未发布（0.3 开发中）
 
+- **轮次节流（M3）**：同一 DSH 会话每小时最多 6 轮，计数存 `<交换目录>\limits.json`，跨重启保留；
+  超限返回 `{ rejected: true, retryAfterSec }`，**不调用 CLI、不新增 `runs.jsonl`**。
+  窗口在第一次计入的轮次开始、固定 1 小时、不滑动，`retryAfterSec` 因此只会递减。
+- relay 自己报额度/限流错误时，`retryAfterSec` 用 relay 给的冷却（解析不到秒数按 300 秒兜底），
+  冷却期内本地直接拒绝；冷却只暂停，不退还已经用掉的窗口轮次。
+- `workbuddy_review` 与 relay 共用这 6 轮额度；`workbuddy_status` 多一行显示本窗口已用/剩余。
 - `workbuddy_review(path, focus?, maxFindings?)`：只读审查固化成工具，固定模板 + 自动 UNREAD 核对。
 - `workbuddy_review` 返回「结论 + 核对」两段，一次调用自足；转录竞态最多重试 4 次。
 - 探索性读取失败（Read 不存在的文件）降级为 WARN，写失败仍是 FAIL。

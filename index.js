@@ -267,6 +267,231 @@ function writeModes(file, modes) {
   }
 }
 
+// --- Round throttle (0.3 M3) ------------------------------------------------
+//
+// One DSH session may spend at most ROUND_LIMIT bridged rounds inside one fixed
+// hour. The counter lives in `<collabDir>\limits.json` so it survives a restart,
+// and the window is *anchored at the first counted round* rather than aligned to
+// the wall clock: a window that does not move means a rejection's `retryAfterSec`
+// really is "time left", never "time left plus however long you keep trying".
+//
+// 6/hour is a local experience value, NOT a copy of relay's own limit — relay's
+// cap is global, so it cannot be mirrored per session. A trip against relay's
+// quota is reported separately: then the engine's own cooldown is the answer and
+// the local window is irrelevant.
+
+export const ROUND_LIMIT = 6;
+export const ROUND_WINDOW_MS = 60 * 60 * 1000;
+
+/** Used when the engine says "quota" but never says for how long. */
+export const DEFAULT_QUOTA_COOLDOWN_SEC = 300;
+
+function limitsPath(dir) {
+  return join(dir, 'limits.json');
+}
+
+/** Missing, corrupt or hostile JSON all mean "no counts yet" — never throw. */
+function readLimits(file) {
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8'));
+    const sessions = raw && typeof raw === 'object' && raw.sessions && typeof raw.sessions === 'object' ? raw.sessions : {};
+    return { sessions };
+  } catch {
+    return { sessions: {} };
+  }
+}
+
+/** Writing is best effort: a read-only exchange folder must not stop all work. */
+function writeLimits(file, limits) {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(limits, null, 2)}\n`, 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeLimitEntry(raw, now, windowMs) {
+  const entry = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const windowStart = Number(entry.windowStart) > 0 ? Number(entry.windowStart) : 0;
+  const used = Number.isInteger(entry.used) && entry.used > 0 ? entry.used : 0;
+  const cooldownUntil = Number(entry.cooldownUntil) > 0 ? Number(entry.cooldownUntil) : 0;
+  // An expired window is a clean slate; the next counted round starts a new one.
+  if (!windowStart || now >= windowStart + windowMs) return { windowStart: 0, used: 0, cooldownUntil };
+  return { windowStart, used, cooldownUntil };
+}
+
+/** Drop sessions nobody can be blocked by any more, so the file stays small. */
+function pruneLimits(sessions, now, windowMs, keepKey) {
+  for (const [key, raw] of Object.entries(sessions)) {
+    if (key === keepKey) continue;
+    const entry = raw && typeof raw === 'object' ? raw : {};
+    const windowStart = Number(entry.windowStart) > 0 ? Number(entry.windowStart) : 0;
+    const cooldownUntil = Number(entry.cooldownUntil) > 0 ? Number(entry.cooldownUntil) : 0;
+    const live = cooldownUntil > now || (windowStart > 0 && now < windowStart + windowMs);
+    if (!live) delete sessions[key];
+  }
+}
+
+/**
+ * Decide whether one bridged round may start. `consume: true` spends the round
+ * (that is the real gate); `consume: false` only reports the current state.
+ *
+ * Returns `{ allowed, used, limit, remaining, windowEndsAt }` when allowed and
+ * `{ allowed: false, rejected: true, reason: 'window' | 'quota', retryAfterSec }`
+ * when not — the caller must not reach the CLI in that case.
+ */
+export function checkRound(options = {}) {
+  const { file, sessionId, now = Date.now(), consume = false } = options;
+  const limit = Number(options.limit) > 0 ? Math.floor(Number(options.limit)) : ROUND_LIMIT;
+  const windowMs = Number(options.windowMs) > 0 ? Number(options.windowMs) : ROUND_WINDOW_MS;
+  const key = String(sessionId ?? 'global');
+  const limits = readLimits(file);
+  const entry = normalizeLimitEntry(limits.sessions[key], now, windowMs);
+
+  // An engine-reported cooldown outranks the local window: it is the real wall.
+  if (entry.cooldownUntil > now) {
+    return {
+      allowed: false,
+      rejected: true,
+      reason: 'quota',
+      retryAfterSec: Math.max(1, Math.ceil((entry.cooldownUntil - now) / 1000)),
+      used: entry.used,
+      limit,
+      remaining: 0,
+      windowEndsAt: entry.windowStart + windowMs,
+      cooldownUntil: entry.cooldownUntil,
+    };
+  }
+
+  if (entry.used >= limit) {
+    const windowEndsAt = entry.windowStart + windowMs;
+    return {
+      allowed: false,
+      rejected: true,
+      reason: 'window',
+      retryAfterSec: Math.max(1, Math.ceil((windowEndsAt - now) / 1000)),
+      used: entry.used,
+      limit,
+      remaining: 0,
+      windowEndsAt,
+    };
+  }
+
+  if (!consume) {
+    return {
+      allowed: true,
+      used: entry.used,
+      limit,
+      remaining: limit - entry.used,
+      windowEndsAt: (entry.windowStart || now) + windowMs,
+    };
+  }
+
+  const windowStart = entry.windowStart || now;
+  entry.windowStart = windowStart;
+  entry.used += 1;
+  limits.sessions[key] = entry;
+  pruneLimits(limits.sessions, now, windowMs, key);
+  const persisted = writeLimits(file, limits);
+  return {
+    allowed: true,
+    used: entry.used,
+    limit,
+    remaining: limit - entry.used,
+    windowEndsAt: windowStart + windowMs,
+    persisted,
+  };
+}
+
+/** Record the engine's own cooldown, so the next rounds are refused locally. */
+export function setQuotaCooldown(options = {}) {
+  const { file, sessionId, seconds, now = Date.now() } = options;
+  const windowMs = Number(options.windowMs) > 0 ? Number(options.windowMs) : ROUND_WINDOW_MS;
+  const key = String(sessionId ?? 'global');
+  const limits = readLimits(file);
+  const entry = normalizeLimitEntry(limits.sessions[key], now, windowMs);
+  if (!entry.windowStart) entry.windowStart = now;
+  const clamped = Math.min(Math.max(Math.ceil(Number(seconds) || 0), 1), 24 * 3600);
+  entry.cooldownUntil = now + clamped * 1000;
+  limits.sessions[key] = entry;
+  pruneLimits(limits.sessions, now, windowMs, key);
+  return { retryAfterSec: clamped, cooldownUntil: entry.cooldownUntil, persisted: writeLimits(file, limits) };
+}
+
+const QUOTA_MARKERS = [
+  /rate[\s_-]*limit/i,
+  /too many requests/i,
+  /quota/i,
+  /\b429\b/,
+  /insufficient[^\n]{0,24}(?:balance|credit|quota)/i,
+  /额度/,
+  /余额/,
+  /(?:请求|调用|访问)[^。\n]{0,8}频繁/,
+];
+
+const COOLDOWN_UNITS = {
+  s: 1,
+  sec: 1,
+  secs: 1,
+  second: 1,
+  seconds: 1,
+  秒: 1,
+  ms: 0.001,
+  毫秒: 0.001,
+  m: 60,
+  min: 60,
+  mins: 60,
+  minute: 60,
+  minutes: 60,
+  分: 60,
+  分钟: 60,
+  h: 3600,
+  hour: 3600,
+  hours: 3600,
+  小时: 3600,
+};
+
+/**
+ * Pull a cooldown out of free-form engine text ("retry after 30s", "冷却 5 分钟",
+ * "429 too many requests"). Heuristic on purpose: no cooldown → the caller falls
+ * back to DEFAULT_QUOTA_COOLDOWN_SEC rather than pretending the limit is gone.
+ */
+export function parseCooldownSeconds(text) {
+  const source = String(text ?? '');
+  if (!source) return undefined;
+  const unit = '(seconds?|secs?|minutes?|mins?|hours?|毫秒|分钟|小时|秒|分|ms|s|m|h)';
+  const patterns = [
+    new RegExp(`retry[^\\d\\n]{0,20}(\\d+(?:\\.\\d+)?)\\s*${unit}?`, 'i'),
+    new RegExp(`(?:冷却|等待|稍后|再过)[^\\d\\n]{0,10}(\\d+(?:\\.\\d+)?)\\s*${unit}?`, 'i'),
+    new RegExp(`(\\d+(?:\\.\\d+)?)\\s*${unit}`, 'i'),
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(source);
+    if (!match) continue;
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount)) continue;
+    const scale = COOLDOWN_UNITS[String(match[2] ?? '').toLowerCase()] ?? 1;
+    const seconds = Math.ceil(amount * scale);
+    if (seconds >= 1) return Math.min(seconds, 24 * 3600);
+  }
+  return undefined;
+}
+
+/** Is this engine failure a quota trip? Keep only text that looks explicit. */
+export function readQuotaFailure(text) {
+  const message = String(text ?? '').trim();
+  if (!message) return undefined;
+  if (!QUOTA_MARKERS.some((pattern) => pattern.test(message))) return undefined;
+  const parsed = parseCooldownSeconds(message);
+  return {
+    retryAfterSec: parsed ?? DEFAULT_QUOTA_COOLDOWN_SEC,
+    explicit: parsed !== undefined,
+    message: message.slice(0, 240),
+  };
+}
+
 function sendJson(res, status, payload) {
   try {
     res.statusCode = status;
@@ -1712,6 +1937,26 @@ const taskOutput = {
 
 export function apply(ctx, config = {}) {
   const bridge = new WorkBuddyBridge(ctx, config);
+
+  // A bridged round spends relay quota, so every path that reaches the CLI asks
+  // for admission first and refuses *before* spawning anything when the window
+  // is spent. The check is per DSH session and persisted, hence restart-safe.
+  const limitFile = limitsPath(bridge.collabDir);
+  const limitSession = (exec) => (exec.agent?.id ? String(exec.agent.id) : 'global');
+  const limitWindowMs = Number(config.roundWindowMs) > 0 ? Number(config.roundWindowMs) : ROUND_WINDOW_MS;
+  const limitCount = Number(config.roundLimit) > 0 ? Number(config.roundLimit) : ROUND_LIMIT;
+  const admitRound = (exec, now = Date.now()) =>
+    checkRound({ file: limitFile, sessionId: limitSession(exec), now, limit: limitCount, windowMs: limitWindowMs, consume: true });
+  const restateLimit = (exec) => checkRound({ file: limitFile, sessionId: limitSession(exec), limit: limitCount, windowMs: limitWindowMs });
+  const markQuota = (exec, seconds, now = Date.now()) =>
+    setQuotaCooldown({ file: limitFile, sessionId: limitSession(exec), seconds, now, windowMs: limitWindowMs });
+  const refusal = (verdict) =>
+    verdict.reason === 'quota'
+      ? `本会话还在 relay 给的冷却里：${verdict.retryAfterSec} 秒后再试。冷却期内的调用不会再发到 CLI。`
+      : `本轮被节流拦下了：本会话这一小时已经派了 ${verdict.used} 轮（上限 ${verdict.limit} 轮/小时）。` +
+        `再等 ${verdict.retryAfterSec} 秒窗口重置后再派——这一轮没有发给 CodeBuddy，也没花额度。` +
+        '想核对已有轮次用 workbuddy_verify，它不占额度。';
+
   ctx.effect(() => () => bridge.dispose());
   bridge.startWatcher();
   bridge.writeReportMarkdown();
@@ -1903,6 +2148,14 @@ export function apply(ctx, config = {}) {
           }`,
           `协作模式：${bridge.isEnabled(exec.agent?.id) ? '开（本会话可调用 CodeBuddy）' : '关（工具已从本会话收走，请用户点输入框下方的「CodeBuddy 协作」开启）'}`,
           `模型：${bridge.currentModel() || '默认（CLI 自选）'}`,
+          `轮次节流：${limitCount} 轮/小时 · ${(() => {
+            const limits = restateLimit(exec);
+            if (limits.rejected) {
+              return `本会话已用满（${limits.used}/${limits.limit}，${limits.reason === 'quota' ? 'relay 冷却中' : '窗口未重置'}），${limits.retryAfterSec} 秒后可再派`;
+            }
+            const resetIn = Math.max(0, Math.ceil((limits.windowEndsAt - Date.now()) / 60000));
+            return `本会话已用 ${limits.used}/${limits.limit}，剩 ${limits.remaining} 轮${limits.used > 0 ? `，窗口 ${resetIn} 分钟后重置` : ''}`;
+          })()}`,
           `看门狗：${bridge.watchTimer ? `运行中（每 ${Math.round(bridge.watchMs / 1000)} 秒查一次 outbox）` : '未运行'}`,
         ];
         return { text: lines.join('\n') };
@@ -2124,7 +2377,8 @@ export function apply(ctx, config = {}) {
       name: 'workbuddy_review',
       description:
         '让 CodeBuddy 只读审查一个文件，并自动核对它到底读没读：固定模板（只读、只报可定位问题、最多 N 条、200 字内），' +
-        '跑完直接返回核对结果（UNREAD/无写入），不用再手动调 workbuddy_verify。需要协作模式开启。',
+        '跑完直接返回核对结果（UNREAD/无写入），不用再手动调 workbuddy_verify。需要协作模式开启。' +
+        '和 relay 共用每小时 6 轮的额度：超限返回 { rejected: true, retryAfterSec } 且不调用 CLI。',
       parameters: {
         type: 'object',
         properties: {
@@ -2136,7 +2390,15 @@ export function apply(ctx, config = {}) {
         additionalProperties: false,
       },
       output: {
-        schema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+        schema: {
+          type: 'object',
+          properties: {
+            text: { type: 'string' },
+            rejected: { type: 'boolean', description: '这一轮被节流 / relay 额度拦下，没有发给 CLI。' },
+            retryAfterSec: { type: 'integer', description: '被拒时：距可以再派还得等多少秒。' },
+          },
+          required: ['text'],
+        },
         render(_args, value) {
           return [{ type: 'text', text: value.text }];
         },
@@ -2158,6 +2420,10 @@ export function apply(ctx, config = {}) {
         if (!commands) return { text: '这个部署没有 commands 服务。' };
         const prompt = buildReviewPrompt(target, args?.focus ? clean(args.focus) : '', args?.maxFindings);
         const roundStartedAt = Date.now();
+        const admission = admitRound(exec, roundStartedAt);
+        if (!admission.allowed) {
+          return { text: refusal(admission), rejected: true, retryAfterSec: admission.retryAfterSec };
+        }
         let result;
         try {
           result = await commands.execute(exec.agent, `/codebuddy ${prompt}`, [], exec.signal);
@@ -2166,7 +2432,19 @@ export function apply(ctx, config = {}) {
         }
         if (!result) return { text: '命令没解析成功——确认 dsh-connect-workbuddy 的 cliBridge 已打开、/codebuddy 存在。' };
         const failure = result.result?.kind === 'error' ? String(result.result.text ?? '') : '';
-        if (failure) return { text: `这一轮失败：${failure}` };
+        if (failure) {
+          const quota = readQuotaFailure(failure);
+          if (!quota) return { text: `这一轮失败：${failure}` };
+          const cooldown = markQuota(exec, quota.retryAfterSec);
+          return {
+            text:
+              `这一轮失败于额度/限流：${failure.slice(0, 300)}\n` +
+              `按${quota.explicit ? 'relay 给的冷却' : '兜底冷却（relay 没给秒数）'}暂停本会话 ${cooldown.retryAfterSec} 秒；` +
+              '冷却期内不再发 CLI。',
+            rejected: true,
+            retryAfterSec: cooldown.retryAfterSec,
+          };
+        }
         const sessionMatch = /session_id=([0-9a-zA-Z-]+)/.exec(String(result.result?.text ?? ''));
         if (!sessionMatch) return { text: '这一轮没有拿到会话 id，核对不可用；结论仍会回注到对话。' };
         // The transcript can land a moment after the command returns; retry a
@@ -2274,7 +2552,8 @@ export function apply(ctx, config = {}) {
       name: 'workbuddy_relay',
       description:
         '替用户敲一次 /codebuddy，把任务交给 dsh-connect-workbuddy 的 CLI 路线：结论会以会话消息回注（界面上看得见），' +
-        '运行期间输入框下方还有实时胶囊显示它在干什么。适合"让 WorkBuddy 干一轮、我在对话里接着看结果"。',
+        '运行期间输入框下方还有实时胶囊显示它在干什么。适合"让 WorkBuddy 干一轮、我在对话里接着看结果"。' +
+        '同一 DSH 会话每小时最多 6 轮：超限直接返回 { rejected: true, retryAfterSec } 且不调用 CLI、不花额度。',
       parameters: {
         type: 'object',
         properties: {
@@ -2284,7 +2563,15 @@ export function apply(ctx, config = {}) {
         additionalProperties: false,
       },
       output: {
-        schema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+        schema: {
+          type: 'object',
+          properties: {
+            text: { type: 'string' },
+            rejected: { type: 'boolean', description: '这一轮被节流 / relay 额度拦下，没有发给 CLI。' },
+            retryAfterSec: { type: 'integer', description: '被拒时：距可以再派还得等多少秒。' },
+          },
+          required: ['text'],
+        },
         render(_args, value) {
           return [{ type: 'text', text: value.text }];
         },
@@ -2298,6 +2585,10 @@ export function apply(ctx, config = {}) {
         const prompt = typeof args?.prompt === 'string' ? args.prompt.trim() : '';
         const line = `/codebuddy${args?.edit === true ? ' --edit' : ''}${prompt ? ` ${prompt}` : ''}`;
         const roundStartedAt = Date.now();
+        const admission = admitRound(exec, roundStartedAt);
+        if (!admission.allowed) {
+          return { text: refusal(admission), rejected: true, retryAfterSec: admission.retryAfterSec };
+        }
         let result;
         try {
           result = await commands.execute(exec.agent, line, [], exec.signal);
@@ -2306,13 +2597,28 @@ export function apply(ctx, config = {}) {
         }
         if (!result) return { text: '命令没解析成功——确认 dsh-connect-workbuddy 的 cliBridge 已打开、/codebuddy 存在。' };
         const failure = result.result?.kind === 'error' ? String(result.result.text ?? '') : '';
-        if (failure) return { text: `CodeBuddy 这一轮失败：${failure}` };
+        if (failure) {
+          // Relay's own quota report outranks the local window: it is the only
+          // one that knows when the global allowance comes back.
+          const quota = readQuotaFailure(failure);
+          if (!quota) return { text: `CodeBuddy 这一轮失败：${failure}` };
+          const cooldown = markQuota(exec, quota.retryAfterSec);
+          return {
+            text:
+              `relay 报了额度/限流错误：${failure.slice(0, 300)}\n` +
+              `按${quota.explicit ? 'relay 给的冷却' : '兜底冷却（relay 没给秒数）'}暂停本会话 ${cooldown.retryAfterSec} 秒；` +
+              '冷却期内不再发 CLI，也不新增记录。',
+            rejected: true,
+            retryAfterSec: cooldown.retryAfterSec,
+          };
+        }
         const output = String(result.result?.text ?? '');
         const sessionMatch = /session_id=([0-9a-zA-Z-]+)/.exec(output);
         if (sessionMatch) bridge.recordRun(sessionMatch[1], roundStartedAt, prompt);
         return {
           text: [
             '已交给 /codebuddy，它跑完会把结论作为消息回注到本会话（界面上能看到），运行中看输入框下方的胶囊。',
+            `本窗口还剩 ${admission.remaining}/${admission.limit} 轮。`,
             '回注之后建议用 workbuddy_verify 核对它到底改了什么——那是证据，不是它的自述。',
           ].join(''),
         };
