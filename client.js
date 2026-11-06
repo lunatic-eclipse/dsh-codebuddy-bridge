@@ -17,7 +17,7 @@ window.__ModuleLoader__.load({
       let record = sessions.get(sessionId);
       if (!record) {
         record = {
-          state: { enabled: false, runs: [], model: '', models: [] },
+          state: { enabled: false, runs: [], model: '', models: [], timing: null },
           listeners: new Set(),
           timer: undefined,
           busy: false,
@@ -53,6 +53,7 @@ window.__ModuleLoader__.load({
           runs: Array.isArray(body?.runs) ? body.runs : [],
           model: typeof body?.model === 'string' ? body.model : '',
           models: Array.isArray(body?.models) ? body.models : [],
+          timing: body?.timing && typeof body.timing === 'object' ? body.timing : null,
         };
         notify(sessionId);
       } catch {
@@ -213,6 +214,15 @@ window.__ModuleLoader__.load({
       fontWeight: 600,
     };
     const older = { ...row, opacity: 0.7, fontSize: 12 };
+    const timingStyle = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      fontSize: 11,
+      lineHeight: '16px',
+      color: 'var(--dsw-alias-label-secondary)',
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    };
     const summaryStyle = {
       fontSize: 12,
       lineHeight: '18px',
@@ -237,6 +247,32 @@ window.__ModuleLoader__.load({
 
     function stepsOf(run) {
       return run && Array.isArray(run.steps) ? run.steps : [];
+    }
+
+    // "思考 vs WorkBuddy" for the whole session. Kept on one line under the
+    // header so it is visible without opening the panel.
+    const TIMING_TITLE =
+      '本会话时间拆分：思考 = step/start→assistant/message；WorkBuddy = workbuddy_* 工具调用；' +
+      '其它 = 读文件、命令等工具。不含你打字的时间。';
+
+    function minutesOf(ms) {
+      const value = Number(ms) || 0;
+      if (value < 60_000) return `${Math.round(value / 1000)}s`;
+      return `${(value / 60_000).toFixed(1)}m`;
+    }
+
+    function timingText(timing) {
+      if (!timing || timing.available !== true) return '';
+      const ratio =
+        timing.workbuddyMs > 0 && timing.thinkMs > 0
+          ? ` · ${(timing.thinkMs / timing.workbuddyMs).toFixed(1)}:1`
+          : '';
+      return (
+        `思考 ${minutesOf(timing.thinkMs)}` +
+        ` · WorkBuddy ${minutesOf(timing.workbuddyMs)}` +
+        ` · 其它 ${minutesOf(timing.otherMs)}` +
+        ratio
+      );
     }
 
     const selectStyle = {
@@ -302,7 +338,7 @@ window.__ModuleLoader__.load({
 
     function Panel(props) {
       const sessionId = props?.sessionId;
-      const { enabled, runs, model, models } = useWorkBuddy(sessionId);
+      const { enabled, runs, model, models, timing } = useWorkBuddy(sessionId);
       const [open, setOpen] = React.useState(() => stored('workbuddy.panel.open', '1') !== '0');
       const [bodyHeight, setBodyHeight] = React.useState(() => {
         const saved = Number(stored('workbuddy.panel.height', BODY_LIMITS.initial));
@@ -322,6 +358,7 @@ window.__ModuleLoader__.load({
             .filter(Boolean)
             .join(' · ')
         : '还没有协作记录';
+      const statsText = timingText(timing);
 
       const toggle = () =>
         setOpen((value) => {
@@ -414,6 +451,9 @@ window.__ModuleLoader__.load({
             ...models.map((item) => h('option', { key: item.id, value: item.id }, item.name)),
           ),
         ),
+        statsText
+          ? h('div', { key: 'timing', style: timingStyle, title: TIMING_TITLE, 'data-workbuddy-timing': 'on' }, statsText)
+          : null,
         ...(open
           ? [
               h(

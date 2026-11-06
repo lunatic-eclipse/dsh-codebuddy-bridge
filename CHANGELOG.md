@@ -2,6 +2,10 @@
 
 ## 0.3.0 — 2026-11-06
 
+- **面板显示时间拆分**：标题下列一行 `思考 20.0m · WorkBuddy 4.4m · 其它 5.6m · 4.5:1`。
+  数据来自 DSH 会话日志（逐帧 zstd 解压，Node 22.15+ 的 `node:zlib`）：
+  `step/start → assistant/message` 算思考，`tool/call → tool/result` 算工具，`workbuddy_*` 单列。
+  每 4 秒随 `/last-run` 一起拉，服务端按 mtime 缓存 10 秒；不含用户打字时间。
 - **`workbuddy_usage(days?)`**：只读用量报表——近 N 天轮数、墙钟耗时（按天/按模式）、每轮 token
   （取自 CLI 转录，按轮次切窗，避免复用会话重复计数）。不花额度、不写文件、不换算积分。
 

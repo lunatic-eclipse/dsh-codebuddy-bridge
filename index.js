@@ -16,6 +16,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative as relativePath, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
+// zstd landed in node:zlib on Node 22.15+; DSH runs 24, so the session log is
+// readable here. Older runtimes simply get "available: false" from the report.
+import * as zlib from 'node:zlib';
 
 export const name = 'codebuddy-bridge';
 export const inject = ['tools', 'webServer'];
@@ -327,6 +330,176 @@ function readFullConclusion(file) {
     if (next) text = next;
   }
   return text || undefined;
+}
+
+// --- Session time split (0.3) -----------------------------------------------
+//
+// DSH's own session log timestamps every event, so one wall clock splits in two:
+// `step/start → assistant/message` is the model thinking (streaming included),
+// `tool/call → tool/result` is a tool running — a WorkBuddy round is one of those.
+//
+// The log is zstd-framed with one frame per append (a thousand+ frames for a long
+// session), and Node's zstd helpers stop after the first frame, so the frames are
+// walked and decompressed one by one. Results are cached by file mtime so a
+// 4-second UI poll does not re-inflate 5 MB every time.
+
+const SESSION_ROOT = join(homedir(), '.dsh', 'sessions');
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+const TIME_CACHE = new Map();
+const TIME_RECOMPUTE_MS = 10_000;
+const WORKBUDDY_TOOL_PREFIX = 'workbuddy_';
+
+/** Locate a session's compressed event log, tolerating the `session-` prefix. */
+function findSessionLog(sessionId, root = SESSION_ROOT) {
+  const needle = String(sessionId ?? '')
+    .replace(/^session-/, '')
+    .trim();
+  if (!needle) return undefined;
+  let workspaces;
+  try {
+    workspaces = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return undefined;
+  }
+  for (const workspace of workspaces) {
+    if (!workspace.isDirectory()) continue;
+    const dir = join(root, workspace.name);
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const bare = entry.name.replace(/^session-/, '');
+      if (bare !== needle && !bare.startsWith(needle)) continue;
+      const file = join(dir, entry.name, 'session.v4.jsonl.zstd');
+      if (existsSync(file)) return file;
+    }
+  }
+  return undefined;
+}
+
+function decompressSessionLog(file) {
+  const zstd = zlib.zstdDecompressSync;
+  if (typeof zstd !== 'function') return undefined;
+  let buffer;
+  try {
+    buffer = readFileSync(file);
+  } catch {
+    return undefined;
+  }
+  const chunks = [];
+  let offset = 0;
+  for (;;) {
+    const at = buffer.indexOf(ZSTD_MAGIC, offset);
+    if (at === -1) break;
+    try {
+      chunks.push(zstd(buffer.subarray(at)));
+    } catch {
+      /* a magic-looking sequence inside a payload; not a frame start */
+    }
+    offset = at + 4;
+  }
+  if (chunks.length === 0) return undefined;
+  // Join on newlines: a frame boundary can fall between two lines, and gluing the
+  // chunks together byte-wise would merge the last line of one frame with the
+  // first of the next, silently losing both.
+  return chunks.map((chunk) => chunk.toString('utf8')).join('\n');
+}
+
+export function splitSessionEvents(text) {
+  let thinkMs = 0;
+  let toolsMs = 0;
+  let turns = 0;
+  let stepStart;
+  const byTool = new Map();
+  const pending = new Map();
+  for (const line of String(text ?? '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const time = typeof event?.time === 'number' ? event.time : undefined;
+    const data = event?.data ?? {};
+    if (event?.type === 'turn/start') {
+      turns += 1;
+    } else if (event?.type === 'step/start') {
+      stepStart = time;
+    } else if (event?.type === 'assistant/message') {
+      if (typeof stepStart === 'number' && typeof time === 'number' && time >= stepStart) thinkMs += time - stepStart;
+      stepStart = undefined;
+    } else if (event?.type === 'tool/call') {
+      const callId = data.callId ?? data.id;
+      if (callId) pending.set(callId, { time, name: String(data.name ?? 'tool') });
+    } else if (event?.type === 'tool/result') {
+      const message = data.message ?? {};
+      const callId = data.toolCallId ?? message.toolCallId ?? message.source?.callId;
+      const call = pending.get(callId);
+      if (!call) continue;
+      pending.delete(callId);
+      if (typeof call.time === 'number' && typeof time === 'number' && time >= call.time) {
+        const delta = time - call.time;
+        toolsMs += delta;
+        byTool.set(call.name, (byTool.get(call.name) ?? 0) + delta);
+      }
+    }
+  }
+  let workbuddyMs = 0;
+  for (const [name, ms] of byTool) {
+    if (name.startsWith(WORKBUDDY_TOOL_PREFIX)) workbuddyMs += ms;
+  }
+  return {
+    thinkMs,
+    toolsMs,
+    workbuddyMs,
+    otherMs: Math.max(0, toolsMs - workbuddyMs),
+    turns,
+    byTool: [...byTool.entries()]
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 8)
+      .map(([name, ms]) => ({ name, ms })),
+  };
+}
+
+/**
+ * The split for one session, or `{ available: false, reason }` when the log is
+ * missing / compressed by an unreadable version. Never throws.
+ */
+export function summarizeSessionTime(options = {}) {
+  const now = typeof options.now === 'number' ? options.now : Date.now();
+  const file = options.file ?? findSessionLog(options.sessionId);
+  if (!file) return { available: false, reason: 'no-session-log' };
+  let stat;
+  try {
+    stat = statSync(file);
+  } catch {
+    return { available: false, reason: 'no-session-log' };
+  }
+  const cached = TIME_CACHE.get(file);
+  if (
+    !options.fresh &&
+    cached &&
+    cached.mtimeMs === stat.mtimeMs &&
+    cached.size === stat.size &&
+    now - cached.computedAt < TIME_RECOMPUTE_MS
+  ) {
+    return cached.result;
+  }
+  const text = decompressSessionLog(file);
+  if (text === undefined) {
+    return {
+      available: false,
+      reason: typeof zlib.zstdDecompressSync === 'function' ? 'unreadable-log' : 'node-without-zstd',
+    };
+  }
+  const result = { available: true, ...splitSessionEvents(text), computedAt: now };
+  TIME_CACHE.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, computedAt: now, result });
+  return result;
 }
 
 // --- Usage report (read-only, no quota) -------------------------------------
@@ -2380,6 +2553,9 @@ export function apply(ctx, config = {}) {
               runs,
               model: bridge.currentModel(),
               models: bridge.modelCatalog(),
+              // Same poll carries the session's time split, so the panel can show
+              // "thinking vs WorkBuddy" without a second request.
+              timing: summarizeSessionTime({ sessionId }),
             });
           } catch (error) {
             sendJson(res, 200, { enabled: false, run: null, error: error instanceof Error ? error.message : String(error) });
