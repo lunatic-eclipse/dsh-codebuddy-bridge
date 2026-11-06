@@ -98,17 +98,39 @@
 
 ## 2. 工具参考
 
-### `workbuddy_relay(prompt, edit?)` —— 主力，看得见
+### `workbuddy_relay(prompt, edit?, mode?)` —— 主力，看得见
 
 代用户敲一次 `/codebuddy`（`dsh-connect-workbuddy` 的 CLI 路线）。结论会以一条带
 `[dsh-connect-workbuddy · 由 /codebuddy 自动回注，不是用户输入]` 前缀的消息进对话。
 
 | 参数 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `prompt` | string | 必填 | 交给 CodeBuddy 的完整任务 |
-| `edit` | boolean | **false** | **默认只读**：要它写/改文件，必须显式传 `edit: true`，否则这一轮白跑还照样花额度 |
+| `prompt` | string | task 必填 | 交给 CodeBuddy 的完整任务；`mode="plan"` 时是你要规划的那个问题 |
+| `edit` | boolean | **false** | **默认只读**：要它写/改文件，必须显式传 `edit: true`，否则这一轮白跑还照样花额度。`mode="plan"` 下恒为只读，此项被忽略 |
+| `mode` | `"task" \| "plan"` | `"task"` | `plan` 走计划模式，见下 |
 
 代价：CodeBuddy 额度 + 一次 DSH 回合。**同一轮任务不要重复调用**，每次都是真花钱。
+
+**每小时 6 轮**（同一 DSH 会话，relay 与 review 共用）：超限直接返回
+`{ rejected: true, retryAfterSec }`，**不调用 CLI、不花额度、不新增记录**。这条线是本地经验值，
+不是 relay 的全局上限。`workbuddy_verify` / `workbuddy_read` / `workbuddy_status` 不占额度。
+
+### 计划模式：`workbuddy_relay(prompt, edit?, mode: "plan")`
+
+拿一个外置大脑想清楚"该怎么做"，而不是查错。特点：
+
+- **只读**：模板写死"不要修改任何文件"，传 `edit: true` 会被忽略；跑完照样做只读核对，写了文件就是 FAIL。
+- **固定顺序**：结论 → 已知约束 → 我的假设 → 候选路线（≥2 条）→ 每条的反例 → 建议。**先给结论**，
+  所以哪怕它写到一半被截断，你也能先看到推荐路线。
+- **不限字数**（和审查的 200 字内相反）：规划需要展开，压缩反而没用。
+- **跳过 UNREAD 核对**：计划可以只凭问题就给出建议，"没读某个文件"不构成问题。
+- **结论写入文件**：`<交换目录>\plans\<时间戳>.md`，含问题、结论、会话 id。返回里会给出这个路径，
+  后续审计可以直接拿它当依据。
+- 允许连续追问：同一个 CLI 会话来回复用，追问同样计入每小时 6 轮。
+
+```text
+workbuddy_relay(prompt: "要不要把这个插件拆成两个", mode: "plan")
+```
 
 ### `codebuddy_ask(message, …)` —— 另一个插件提供的静默工具
 
@@ -123,7 +145,7 @@
 
 ### `workbuddy_status()`
 
-引擎路径、认证、当前会话、交换目录、轮次状态、**协作模式**、**当前模型**、看门狗。开工前和排错都先看它。
+引擎路径、认证、当前会话、交换目录、轮次状态、**协作模式**、**当前模型**、**本轮额度的已用/剩余（按计划/审计/任务分开显示）**、看门狗。开工前和排错都先看它。
 
 ### `workbuddy_verify(run?, session?)`
 

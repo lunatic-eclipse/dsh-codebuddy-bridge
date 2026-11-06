@@ -2,6 +2,12 @@
 
 ## 未发布（0.3 开发中）
 
+- **计划模式**：`workbuddy_relay(prompt, edit?, mode='plan')`。只读（`edit` 被忽略）+ 固定顺序
+  （结论 → 约束 → 假设 → 候选路线 → 每条的反例 → 建议，先给结论）+ 不限字数；结论写入
+  `<交换目录>\plans\<时间戳>.md` 并在返回里给路径。
+  - 计划轮**不跑 UNREAD**（只凭问题给建议是合法的），但仍做只读守卫：写了文件就是 FAIL；
+  - 记录带 `mode`，因此 `workbuddy_verify(run=…)` 与 `workbuddy_verify(session=…)` 事后都不会误判；
+  - 与 relay/review 共用每小时 6 轮额度，状态行按 `计划 x · 审计 y · 任务 z` 分开显示。
 - **轮次节流（M3）**：同一 DSH 会话每小时最多 6 轮，计数存 `<交换目录>\limits.json`，跨重启保留；
   超限返回 `{ rejected: true, retryAfterSec }`，**不调用 CLI、不新增 `runs.jsonl`**。
   窗口在第一次计入的轮次开始、固定 1 小时、不滑动，`retryAfterSec` 因此只会递减。

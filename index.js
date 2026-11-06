@@ -80,6 +80,31 @@ export function buildReviewPrompt(path, focus, maxFindings) {
   return lines.join('\n');
 }
 
+/**
+ * The fixed plan prompt. Unlike a review it has no word budget — the point is to
+ * think, not to compress — but it keeps the same contract: read-only, a fixed
+ * order, and a counter-argument for every route so the answer cannot be a single
+ * confident guess. The user's question is quoted, never allowed to replace the
+ * rules: "just give me the answer" still has to show its counter-examples.
+ */
+export function buildPlanPrompt(task) {
+  const question = String(task ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return [
+    '任务：只读地帮我做规划，不要修改任何文件。',
+    `问题：${question}`,
+    '按这个顺序输出，先给结论再展开：',
+    '1. 结论：一句话说清推荐哪条路。',
+    '2. 已知约束：只写问题里能确定的事实，缺的就标"不知道"。',
+    '3. 我的假设：你补了哪些前提，逐条标明这是假设。',
+    '4. 候选路线：至少 2 条，每条一句做法。',
+    '5. 每条的反例：这条路线最可能在哪失效、什么情况下别选它。',
+    '6. 建议：选哪条、为什么、第一步做什么。',
+    '可以回答"信息不够"，但要写清缺什么。不要为了凑格式编造约束、路线或反例；不要联网。',
+  ].join('\n');
+}
+
 /** Trim an engine tool payload down to something a human can approve. */
 function summarizeToolInput(input, limit = 600) {
   if (input === undefined || input === null) return '';
@@ -267,6 +292,54 @@ function writeModes(file, modes) {
   }
 }
 
+// --- Plan rounds (0.3, after M3) --------------------------------------------
+//
+// A plan round answers "what should we do", so its conclusion is the deliverable.
+// Chat scrolls away; a file under `<collabDir>\plans\` does not, and a later
+// audit can quote it. Read-only by contract: the prompt forbids writes, and the
+// round is verified that way afterwards.
+
+function planStamp(at) {
+  const date = new Date(at);
+  const pad = (value) => String(value).padStart(2, '0');
+  return (
+    `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}` +
+    `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+  );
+}
+
+/** Store one plan conclusion; returns the path, or undefined if it could not. */
+function writePlanFile(dir, { at, prompt, conclusion, sessionId }) {
+  try {
+    const plansDir = join(dir, 'plans');
+    mkdirSync(plansDir, { recursive: true });
+    const stamp = planStamp(at);
+    let file = join(plansDir, `${stamp}.md`);
+    // Two plans inside one second must not overwrite each other.
+    for (let suffix = 2; existsSync(file); suffix += 1) file = join(plansDir, `${stamp}-${suffix}.md`);
+    const lines = [
+      `# 计划 · ${stamp}`,
+      '',
+      `- 会话：${sessionId ?? '（这一轮没拿到会话 id）'}`,
+      `- 时间：${new Date(at).toLocaleString('zh-CN')}`,
+      '- 只读轮：模板禁止改文件，跑完按只读核对',
+      '',
+      '## 问题',
+      '',
+      String(prompt ?? '').trim() || '（未写）',
+      '',
+      '## 结论',
+      '',
+      String(conclusion ?? '').trim() || '（这一轮没有回注结论；见 CLI 会话记录。）',
+      '',
+    ];
+    writeFileSync(file, lines.join('\n'), 'utf8');
+    return file;
+  } catch {
+    return undefined;
+  }
+}
+
 // --- Round throttle (0.3 M3) ------------------------------------------------
 //
 // One DSH session may spend at most ROUND_LIMIT bridged rounds inside one fixed
@@ -317,9 +390,17 @@ function normalizeLimitEntry(raw, now, windowMs) {
   const windowStart = Number(entry.windowStart) > 0 ? Number(entry.windowStart) : 0;
   const used = Number.isInteger(entry.used) && entry.used > 0 ? entry.used : 0;
   const cooldownUntil = Number(entry.cooldownUntil) > 0 ? Number(entry.cooldownUntil) : 0;
+  // Per-kind counts are display-only: the cap is the shared one above. They make
+  // "who spent the hour" visible without splitting the budget three ways.
+  const byKind = {};
+  if (entry.byKind && typeof entry.byKind === 'object' && !Array.isArray(entry.byKind)) {
+    for (const [kind, value] of Object.entries(entry.byKind)) {
+      if (Number.isInteger(value) && value > 0) byKind[kind] = value;
+    }
+  }
   // An expired window is a clean slate; the next counted round starts a new one.
-  if (!windowStart || now >= windowStart + windowMs) return { windowStart: 0, used: 0, cooldownUntil };
-  return { windowStart, used, cooldownUntil };
+  if (!windowStart || now >= windowStart + windowMs) return { windowStart: 0, used: 0, cooldownUntil, byKind: {} };
+  return { windowStart, used, cooldownUntil, byKind };
 }
 
 /** Drop sessions nobody can be blocked by any more, so the file stays small. */
@@ -346,6 +427,8 @@ export function checkRound(options = {}) {
   const { file, sessionId, now = Date.now(), consume = false } = options;
   const limit = Number(options.limit) > 0 ? Math.floor(Number(options.limit)) : ROUND_LIMIT;
   const windowMs = Number(options.windowMs) > 0 ? Number(options.windowMs) : ROUND_WINDOW_MS;
+  // Display-only: the cap is shared, but the status line shows who spent it.
+  const kind = typeof options.kind === 'string' && options.kind.trim() ? options.kind.trim() : 'task';
   const key = String(sessionId ?? 'global');
   const limits = readLimits(file);
   const entry = normalizeLimitEntry(limits.sessions[key], now, windowMs);
@@ -360,6 +443,7 @@ export function checkRound(options = {}) {
       used: entry.used,
       limit,
       remaining: 0,
+      byKind: { ...entry.byKind },
       windowEndsAt: entry.windowStart + windowMs,
       cooldownUntil: entry.cooldownUntil,
     };
@@ -375,6 +459,7 @@ export function checkRound(options = {}) {
       used: entry.used,
       limit,
       remaining: 0,
+      byKind: { ...entry.byKind },
       windowEndsAt,
     };
   }
@@ -385,6 +470,7 @@ export function checkRound(options = {}) {
       used: entry.used,
       limit,
       remaining: limit - entry.used,
+      byKind: { ...entry.byKind },
       windowEndsAt: (entry.windowStart || now) + windowMs,
     };
   }
@@ -392,6 +478,7 @@ export function checkRound(options = {}) {
   const windowStart = entry.windowStart || now;
   entry.windowStart = windowStart;
   entry.used += 1;
+  entry.byKind[kind] = (entry.byKind[kind] ?? 0) + 1;
   limits.sessions[key] = entry;
   pruneLimits(limits.sessions, now, windowMs, key);
   const persisted = writeLimits(file, limits);
@@ -400,6 +487,7 @@ export function checkRound(options = {}) {
     used: entry.used,
     limit,
     remaining: limit - entry.used,
+    byKind: { ...entry.byKind },
     windowEndsAt: windowStart + windowMs,
     persisted,
   };
@@ -909,6 +997,9 @@ function resolveRound(dir, options = {}) {
       at: Date.now(),
       ...(prior?.prompt ? { prompt: prior.prompt } : {}),
       ...(Array.isArray(prior?.requested) ? { requested: prior.requested } : {}),
+      // Carry the round kind too, or a plan verified by session id would be
+      // judged as a review and blamed for files it never opened.
+      ...(typeof prior?.mode === 'string' && prior.mode ? { mode: prior.mode } : {}),
       ...parsed,
     };
   }
@@ -1118,6 +1209,10 @@ export function verifyRound(dir, options = {}) {
   // it was asked to review". Claimed = files the prompt named ∪ files the summary
   // says it read (advice excluded). A Grep/Glob-only round is downgraded to WARN:
   // searching is not reading, but it is not proof of a fake review either.
+  //
+  // Plan rounds are excluded: a plan can be answered from the prompt alone, so
+  // "never opened the file" says nothing about whether the advice is sound.
+  const unreadApplies = options.skipUnread !== true && record.mode !== 'plan';
   const requested = new Map();
   if (Array.isArray(record.requested)) {
     for (const display of record.requested) {
@@ -1126,24 +1221,26 @@ export function verifyRound(dir, options = {}) {
       requested.set(pathKey(absolute, cwd), { display, absolute });
     }
   }
-  if (requested.size === 0) {
-    for (const [key, item] of extractPromptPaths(record.prompt, cwd)) requested.set(key, item);
-  }
-  if (modified.size === 0 || requested.size > 0) {
-    const reads = new Set(
-      actions
-        .filter((action) => (action.name === 'Read' || action.name === 'ReadImage') && action.path)
-        .map((action) => pathKey(action.path, cwd)),
-    );
-    const searched = actions.some((action) => action.name === 'Grep' || action.name === 'Glob');
-    const claimed = new Map([...requested, ...extractMentionedPaths(record.summary ?? '', cwd)]);
-    for (const [key, item] of claimed) {
-      if (reads.has(key)) continue;
-      if (searched) {
-        push('WARN', item.display, ['UNREAD?：没看到 Read 它，但这一轮用了 Grep/Glob，可能用搜索核对过']);
-        continue;
+  if (unreadApplies) {
+    if (requested.size === 0) {
+      for (const [key, item] of extractPromptPaths(record.prompt, cwd)) requested.set(key, item);
+    }
+    if (modified.size === 0 || requested.size > 0) {
+      const reads = new Set(
+        actions
+          .filter((action) => (action.name === 'Read' || action.name === 'ReadImage') && action.path)
+          .map((action) => pathKey(action.path, cwd)),
+      );
+      const searched = actions.some((action) => action.name === 'Grep' || action.name === 'Glob');
+      const claimed = new Map([...requested, ...extractMentionedPaths(record.summary ?? '', cwd)]);
+      for (const [key, item] of claimed) {
+        if (reads.has(key)) continue;
+        if (searched) {
+          push('WARN', item.display, ['UNREAD?：没看到 Read 它，但这一轮用了 Grep/Glob，可能用搜索核对过']);
+          continue;
+        }
+        push('FAIL', item.display, ['UNREAD：这一轮声称审了它，但没有任何 Read 指向这个文件']);
       }
-      push('FAIL', item.display, ['UNREAD：这一轮声称审了它，但没有任何 Read 指向这个文件']);
     }
   }
 
@@ -1694,7 +1791,7 @@ class WorkBuddyBridge {
    * `roundStartedAt` marks where this round began — a CLI session is reused, so
    * its transcript also holds the earlier rounds and verification needs a cut.
    */
-  recordRun(sessionId, roundStartedAt, prompt) {
+  recordRun(sessionId, roundStartedAt, prompt, extra = {}) {
     const parsed = parseCliSession(sessionId);
     if (!parsed) return undefined;
     try {
@@ -1711,6 +1808,8 @@ class WorkBuddyBridge {
         ...(typeof roundStartedAt === 'number' ? { roundStartedAt } : {}),
         ...(typeof prompt === 'string' && prompt.trim() ? { prompt: prompt.trim().slice(0, 4000) } : {}),
         ...(requested.length > 0 ? { requested } : {}),
+        // `mode` is what keeps a plan round from being judged as a review later.
+        ...(extra && typeof extra.mode === 'string' && extra.mode ? { mode: extra.mode } : {}),
       };
       writeFileSync(join(this.collabDir, 'last-run.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
       appendFileSync(join(this.collabDir, 'runs.jsonl'), `${JSON.stringify(record)}\n`, 'utf8');
@@ -1945,8 +2044,16 @@ export function apply(ctx, config = {}) {
   const limitSession = (exec) => (exec.agent?.id ? String(exec.agent.id) : 'global');
   const limitWindowMs = Number(config.roundWindowMs) > 0 ? Number(config.roundWindowMs) : ROUND_WINDOW_MS;
   const limitCount = Number(config.roundLimit) > 0 ? Number(config.roundLimit) : ROUND_LIMIT;
-  const admitRound = (exec, now = Date.now()) =>
-    checkRound({ file: limitFile, sessionId: limitSession(exec), now, limit: limitCount, windowMs: limitWindowMs, consume: true });
+  const admitRound = (exec, now = Date.now(), kind = 'task') =>
+    checkRound({
+      file: limitFile,
+      sessionId: limitSession(exec),
+      now,
+      kind,
+      limit: limitCount,
+      windowMs: limitWindowMs,
+      consume: true,
+    });
   const restateLimit = (exec) => checkRound({ file: limitFile, sessionId: limitSession(exec), limit: limitCount, windowMs: limitWindowMs });
   const markQuota = (exec, seconds, now = Date.now()) =>
     setQuotaCooldown({ file: limitFile, sessionId: limitSession(exec), seconds, now, windowMs: limitWindowMs });
@@ -2150,11 +2257,17 @@ export function apply(ctx, config = {}) {
           `模型：${bridge.currentModel() || '默认（CLI 自选）'}`,
           `轮次节流：${limitCount} 轮/小时 · ${(() => {
             const limits = restateLimit(exec);
+            // The cap is shared; the breakdown answers "who spent the hour".
+            const labels = { task: '任务', plan: '计划', audit: '审计' };
+            const breakdown = Object.entries(limits.byKind ?? {})
+              .filter(([, count]) => count > 0)
+              .map(([kind, count]) => `${labels[kind] ?? kind} ${count}`)
+              .join(' · ');
             if (limits.rejected) {
-              return `本会话已用满（${limits.used}/${limits.limit}，${limits.reason === 'quota' ? 'relay 冷却中' : '窗口未重置'}），${limits.retryAfterSec} 秒后可再派`;
+              return `本会话已用满（${limits.used}/${limits.limit}${breakdown ? `：${breakdown}` : ''}，${limits.reason === 'quota' ? 'relay 冷却中' : '窗口未重置'}），${limits.retryAfterSec} 秒后可再派`;
             }
             const resetIn = Math.max(0, Math.ceil((limits.windowEndsAt - Date.now()) / 60000));
-            return `本会话已用 ${limits.used}/${limits.limit}，剩 ${limits.remaining} 轮${limits.used > 0 ? `，窗口 ${resetIn} 分钟后重置` : ''}`;
+            return `本会话已用 ${limits.used}/${limits.limit}${breakdown ? `（${breakdown}）` : ''}，剩 ${limits.remaining} 轮${limits.used > 0 ? `，窗口 ${resetIn} 分钟后重置` : ''}`;
           })()}`,
           `看门狗：${bridge.watchTimer ? `运行中（每 ${Math.round(bridge.watchMs / 1000)} 秒查一次 outbox）` : '未运行'}`,
         ];
@@ -2420,7 +2533,7 @@ export function apply(ctx, config = {}) {
         if (!commands) return { text: '这个部署没有 commands 服务。' };
         const prompt = buildReviewPrompt(target, args?.focus ? clean(args.focus) : '', args?.maxFindings);
         const roundStartedAt = Date.now();
-        const admission = admitRound(exec, roundStartedAt);
+        const admission = admitRound(exec, roundStartedAt, 'audit');
         if (!admission.allowed) {
           return { text: refusal(admission), rejected: true, retryAfterSec: admission.retryAfterSec };
         }
@@ -2553,12 +2666,18 @@ export function apply(ctx, config = {}) {
       description:
         '替用户敲一次 /codebuddy，把任务交给 dsh-connect-workbuddy 的 CLI 路线：结论会以会话消息回注（界面上看得见），' +
         '运行期间输入框下方还有实时胶囊显示它在干什么。适合"让 WorkBuddy 干一轮、我在对话里接着看结果"。' +
+        'mode="plan" 是计划模式：只读地想路线/假设/反例，结论存到交换目录的 plans/ 下。' +
         '同一 DSH 会话每小时最多 6 轮：超限直接返回 { rejected: true, retryAfterSec } 且不调用 CLI、不花额度。',
       parameters: {
         type: 'object',
         properties: {
-          prompt: { type: 'string', description: '交给 CodeBuddy 的话；留空等于"评审当前工作区未提交的改动"。' },
-          edit: { type: 'boolean', description: '这一轮是否允许它改文件（等价于 /codebuddy --edit）。' },
+          prompt: { type: 'string', description: '交给 CodeBuddy 的话；task 模式留空等于"评审当前工作区未提交的改动"。' },
+          edit: { type: 'boolean', description: 'task 模式：这一轮是否允许它改文件（等价于 /codebuddy --edit）。plan 模式恒为只读，此项被忽略。' },
+          mode: {
+            type: 'string',
+            enum: ['task', 'plan'],
+            description: 'task（默认）= 干活/评审；plan = 只读规划：约束、假设、候选路线、每条的反例、建议，先给结论。',
+          },
         },
         additionalProperties: false,
       },
@@ -2582,10 +2701,18 @@ export function apply(ctx, config = {}) {
         }
         const commands = ctx.get('commands');
         if (!commands) return { text: '这个部署没有 commands 服务。' };
+        const planned = args?.mode === 'plan';
         const prompt = typeof args?.prompt === 'string' ? args.prompt.trim() : '';
-        const line = `/codebuddy${args?.edit === true ? ' --edit' : ''}${prompt ? ` ${prompt}` : ''}`;
+        if (planned && !prompt) {
+          return { text: '计划模式要一个具体问题：把要规划的事写在 prompt 里（例如"要不要把这个插件拆成两个"）。' };
+        }
+        // Plan rounds are read-only by contract: `edit` is ignored, not obeyed.
+        const ignoredEdit = planned && args?.edit === true;
+        const line = planned
+          ? `/codebuddy ${buildPlanPrompt(prompt)}`
+          : `/codebuddy${args?.edit === true ? ' --edit' : ''}${prompt ? ` ${prompt}` : ''}`;
         const roundStartedAt = Date.now();
-        const admission = admitRound(exec, roundStartedAt);
+        const admission = admitRound(exec, roundStartedAt, planned ? 'plan' : 'task');
         if (!admission.allowed) {
           return { text: refusal(admission), rejected: true, retryAfterSec: admission.retryAfterSec };
         }
@@ -2614,13 +2741,53 @@ export function apply(ctx, config = {}) {
         }
         const output = String(result.result?.text ?? '');
         const sessionMatch = /session_id=([0-9a-zA-Z-]+)/.exec(output);
-        if (sessionMatch) bridge.recordRun(sessionMatch[1], roundStartedAt, prompt);
+
+        if (!planned) {
+          if (sessionMatch) bridge.recordRun(sessionMatch[1], roundStartedAt, prompt, { mode: 'task' });
+          return {
+            text: [
+              '已交给 /codebuddy，它跑完会把结论作为消息回注到本会话（界面上能看到），运行中看输入框下方的胶囊。',
+              `本窗口还剩 ${admission.remaining}/${admission.limit} 轮。`,
+              '回注之后建议用 workbuddy_verify 核对它到底改了什么——那是证据，不是它的自述。',
+            ].join(''),
+          };
+        }
+
+        // Plan: the conclusion is the deliverable, so it has to land on disk. The
+        // transcript can show up a moment after the command returns, hence retry.
+        let record;
+        for (let attempt = 0; attempt < 4 && !record; attempt += 1) {
+          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 300));
+          if (sessionMatch) record = bridge.recordRun(sessionMatch[1], roundStartedAt, prompt, { mode: 'plan' });
+        }
+        const conclusion = String(record?.summary ?? '').trim();
+        const stored = writePlanFile(bridge.collabDir, {
+          at: roundStartedAt,
+          prompt,
+          conclusion,
+          sessionId: record?.sessionId,
+        });
+        let check = '';
+        if (record) {
+          try {
+            // No UNREAD here (a plan may legitimately read nothing); the read-only
+            // contract still applies, and verifyRound skips UNREAD on mode='plan'.
+            check = verifyRound(bridge.collabDir, { run: 1, cwd: bridge.defaults.cwd, expectReadOnly: true }).text;
+          } catch (error) {
+            check = `核对失败：${error instanceof Error ? error.message : String(error)}`;
+          }
+        }
         return {
           text: [
-            '已交给 /codebuddy，它跑完会把结论作为消息回注到本会话（界面上能看到），运行中看输入框下方的胶囊。',
+            '计划轮跑完了（只读契约：这一轮不该改文件）。',
+            ...(ignoredEdit ? ['你传了 edit=true，计划模式强制只读，已忽略。'] : []),
+            stored ? `已存到：${stored}` : '结论没能落盘——这一轮的记录不可用，别把回注的内容当定稿。',
+            conclusion ? `\n结论：\n${conclusion.slice(0, 900)}` : '',
+            check ? `\n—— 只读核对 ——\n${check}` : '',
             `本窗口还剩 ${admission.remaining}/${admission.limit} 轮。`,
-            '回注之后建议用 workbuddy_verify 核对它到底改了什么——那是证据，不是它的自述。',
-          ].join(''),
+          ]
+            .filter(Boolean)
+            .join('\n'),
         };
       },
     }),
