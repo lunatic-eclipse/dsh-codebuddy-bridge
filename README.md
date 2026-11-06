@@ -57,11 +57,19 @@ dsh plugin --profile web add github:<owner>/<repo>
 
 | 工具 | 作用 |
 | --- | --- |
-| `workbuddy_relay(prompt, edit?)` | 代敲 `/codebuddy`，结论回注对话（需要 `dsh-connect-workbuddy`） |
+| `workbuddy_relay(prompt, edit?, mode?)` | 代敲 `/codebuddy`，结论回注对话（需要 `dsh-connect-workbuddy`）；`mode="plan"` 是只读规划 |
+| `workbuddy_review(path, focus?, maxFindings?)` | 只读审查一个文件：固定模板 + 自动核对它读没读、有没有写 |
 | `workbuddy_verify(run?, session?)` | 核对某轮改没改：PASS/FAIL/WARN + 证据；不花额度 |
 | `workbuddy_read(turns?, session?)` | 读 WorkBuddy 桌面版自己的会话记录 |
 | `workbuddy_status()` / `workbuddy_close()` | 状态与会话管理 |
 | `workbuddy_dispatch(task)` + `/dsh-handoff` | 老的文件交接兜底通道 |
+
+**两种模式**：审计（`workbuddy_review`）查错——位置—问题—改法，最多 N 条、200 字内；
+计划（`workbuddy_relay(mode="plan")`）想清楚——结论 / 约束 / 假设 / 候选路线 / 每条的反例 / 建议，
+只读、不限字数，结论存到交换目录的 `plans\<时间戳>.md`。
+
+`relay` 与 `review` 共用**每会话每小时 6 轮**的额度，超限直接返回 `{ rejected: true, retryAfterSec }`，
+不调用 CLI、不花额度；`verify` / `read` / `status` 本地读文件，不占额度。
 
 > 工具名沿用 `workbuddy_*`：它们对接的一直是这台机器上的 WorkBuddy/CodeBuddy 引擎，改包名时没有跟着改，避免老文档和老习惯全断。
 
@@ -78,12 +86,14 @@ dsh plugin --profile web add github:<owner>/<repo>
 | `model` | 引擎默认 | 透传 `--model` |
 | `timeoutMs` | 900000 | 单轮超时 |
 | `watchMs` | 3000 | 兜底通道的轮询间隔 |
+| `roundLimit` | 6 | 每会话每窗口最多几轮（`relay` + `review` 共用） |
+| `roundWindowMs` | 3600000 | 窗口长度；从第一次计入的轮次起算，不滑动 |
 
 ## 权限与隐私
 
 - **读**：`~/.codebuddy/projects/<slug>/<session>.jsonl`（CLI 自己的会话记录），用来生成面板和核对证据；
   以及 `~/.workbuddy/projects`（只有 `workbuddy_read` 读它）。
-- **写**：`collabDir` 下的几个 jsonl/md；引擎本身按 `permissionMode` 写工作区文件。
+- **写**：`collabDir` 下的几个 jsonl/md（含 `limits.json` 额度账本与 `plans\` 下的计划结论）；引擎本身按 `permissionMode` 写工作区文件。
 - **不碰**：账号 token、登录态文件、任何网络请求（网络只发生在 CodeBuddy CLI 内部）。
 - 面板要显示明细，所以会话记录的“工具调用参数摘要”会进入 DSH 的对话上下文——敏感工作区请自行评估。
 
@@ -93,6 +103,9 @@ dsh plugin --profile web add github:<owner>/<repo>
 - 面板不在右侧边栏（第三方插件开不了那个位置），放在输入框上方。
 - 没有“运行中”的实时进度，只有跑完后的明细。
 - `workbuddy_verify` 只能核对**动作 + 文件事实**；它说得对但没做的、或者做了没说的，都会标出来，判断仍然要人来做。
+- 节流按 **DSH 会话**计数：重启不会清零，但**开新会话会**（这是有意的边界，防的是同会话内失败重试）。
+  固定窗口在两个窗口的交界处，理论上一小时内可过接近 2 倍名义值。
+- 计划模式的结论只保证"落盘完整"；它的建议对不对，仍要人来判断。
 
 ## 开发
 

@@ -33,6 +33,17 @@ dsh plugin --profile web add dsh-codebuddy-bridge
 3. The result is injected into the conversation; the panel above the composer lists each step.
 4. Ask it to verify: `workbuddy_verify()` returns PASS / FAIL / WARN with evidence, no API cost.
 
+Two modes, both fixed-template so runs are comparable:
+
+| Mode | Tool | Output |
+| --- | --- | --- |
+| **Audit** — find what is wrong | `workbuddy_review(path, focus?, maxFindings?)` | location — problem — fix, at most N findings, 200 chars |
+| **Plan** — decide what to do | `workbuddy_relay(prompt, mode: "plan")` | conclusion first, then constraints / assumptions / routes / a counter-example per route / recommendation; read-only, saved to `plans\<timestamp>.md` |
+
+`relay` and `review` share a budget of **6 rounds per session per hour**; over it the tool returns
+`{ rejected: true, retryAfterSec }` without ever calling the CLI. `verify` / `read` / `status` are local
+and free.
+
 ## Privacy
 
 Reads `~/.codebuddy/projects/**` (CLI transcripts) and, for `workbuddy_read`, `~/.workbuddy/projects`.
