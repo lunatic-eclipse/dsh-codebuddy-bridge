@@ -720,7 +720,9 @@ function writePlanFile(dir, { at, prompt, conclusion, sessionId }) {
       '',
       String(prompt ?? '').trim() || '（未写）',
       '',
-      '## 结论',
+      // The model's answer already opens with its own "1. 结论" heading, so a
+      // second "## 结论" here would read as a duplicate.
+      '## 模型回答',
       '',
       String(conclusion ?? '').trim() || '（这一轮没有回注结论；见 CLI 会话记录。）',
       '',
@@ -3201,12 +3203,16 @@ export function apply(ctx, config = {}) {
             check = `核对失败：${error instanceof Error ? error.message : String(error)}`;
           }
         }
+        // The card cannot hold a 3000-character plan, but cutting it silently
+        // looks like a bug. Say so, and point at the file that has the rest.
+        const shown =
+          conclusion.length > 900 ? `${conclusion.slice(0, 900)}…\n（已截断，完整结论见上面那个文件）` : conclusion;
         return {
           text: [
             '计划轮跑完了（只读契约：这一轮不该改文件）。',
             ...(ignoredEdit ? ['你传了 edit=true，计划模式强制只读，已忽略。'] : []),
             stored ? `已存到：${stored}` : '结论没能落盘——这一轮的记录不可用，别把回注的内容当定稿。',
-            conclusion ? `\n结论：\n${conclusion.slice(0, 900)}` : '',
+            conclusion ? `\n结论：\n${shown}` : '',
             check ? `\n—— 只读核对 ——\n${check}` : '',
             `本窗口还剩 ${admission.remaining}/${admission.limit} 轮。`,
           ]

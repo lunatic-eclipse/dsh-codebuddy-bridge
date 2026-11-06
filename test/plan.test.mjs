@@ -158,7 +158,7 @@ test('the conclusion lands in plans/ with the question it answered', async () =>
     const file = h.planFile();
     const body = readFileSync(file, 'utf8');
     assert.match(body, /## 问题[\s\S]*先做节流还是先拆插件/);
-    assert.match(body, /## 结论[\s\S]*先做节流/);
+    assert.match(body, /## 模型回答[\s\S]*先做节流/);
     assert.match(body, /只读轮/);
     assert.ok(out.text.includes(file), `the tool must return the path it wrote: ${out.text}`);
     assert.match(out.text, /只读核对/);
@@ -167,7 +167,7 @@ test('the conclusion lands in plans/ with the question it answered', async () =>
   }
 });
 
-test('a long conclusion is stored whole, not cut at the 500-char summary cap', async () => {
+test('a long conclusion is stored whole, and the card says when it cut the text', async () => {
   // record.summary is capped at 500 chars as an index; a plan's file is the
   // deliverable, so the tail has to survive. A real run found this by ending a
   // stored plan mid-sentence.
@@ -175,10 +175,13 @@ test('a long conclusion is stored whole, not cut at the 500-char summary cap', a
   assert.ok(conclusion.length > 1000);
   const h = harness({ summary: conclusion });
   try {
-    await h.execute('workbuddy_relay', { prompt: '写一份很长的规划', mode: 'plan' });
+    const out = await h.execute('workbuddy_relay', { prompt: '写一份很长的规划', mode: 'plan' });
     const stored = readFileSync(h.planFile(), 'utf8');
     assert.ok(stored.includes('结尾哨兵-COMPLETE'), 'the tail must survive the 500-char summary cap');
     assert.ok(stored.length > 1000, `stored ${stored.length} chars`);
+    // A card that silently stops mid-sentence reads like a bug: mark the cut.
+    assert.match(out.text, /已截断，完整结论见上面那个文件/);
+    assert.doesNotMatch(out.text, /结尾哨兵-COMPLETE/, 'the card still shows only the head');
   } finally {
     h.dispose();
   }
