@@ -72,10 +72,11 @@
     "LICENSE",
     "screenshots.json",
     "docs/assets",
+    "tools",
     "test"
   ],
   "scripts": {
-    "test": "node test/verify.test.mjs && node test/throttle.test.mjs && node test/plan.test.mjs && node test/usage.test.mjs && node test/time.test.mjs && node test/failure.test.mjs",
+    "test": "node test/verify.test.mjs && node test/throttle.test.mjs && node test/plan.test.mjs && node test/usage.test.mjs && node test/time.test.mjs && node test/failure.test.mjs && node test/score.test.mjs",
     "prepublishOnly": "npm test && node --check index.js && node --check client.js"
   },
   "publishConfig": {
