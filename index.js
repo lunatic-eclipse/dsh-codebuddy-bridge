@@ -1469,6 +1469,20 @@ export function verifyRound(dir, options = {}) {
   if (!record) {
     return { text: '没有可核对的轮次：runs.jsonl 里没有这么多轮，也没指定 session。先派一轮活，或查一下轮次号。' };
   }
+  // A round that never finished has no transcript, but saying "nothing to check"
+  // would read as "nothing happened" — the opposite of the truth.
+  if (record.status === 'failed') {
+    const when = typeof record.at === 'number' ? new Date(record.at).toLocaleString('zh-CN') : '时间未知';
+    const asked = typeof record.prompt === 'string' && record.prompt.trim() ? record.prompt.trim().slice(0, 80) : '';
+    return {
+      text: [
+        `这一轮没跑完：${record.error ?? '（没有留下错误信息）'}`,
+        `${when}${asked ? ` · 派给它的是：${asked}` : ''}`,
+        '它可能已经改了一部分文件，但没有留下会话记录——知道 CLI 会话 id 的话，用 workbuddy_verify(session=…) 仍能核对；' +
+          '否则按这个时间翻 CLI 转录，别直接当成"什么都没发生"。',
+      ].join('\n'),
+    };
+  }
   const file = record.file && existsSync(record.file) ? record.file : findCliSessionFile(record.sessionId);
   const events = file ? readCliEvents(file) : undefined;
   if (!events || events.length === 0) {
@@ -1977,6 +1991,10 @@ class WorkBuddyBridge {
     this.waking = false;
     this.modeFile = join(this.collabDir, 'modes.json');
     this.modes = readModes(this.modeFile);
+    // A round writes its intent here *before* touching the CLI. If the host dies
+    // mid-round, the process that would have written the result is already gone —
+    // this file is the only thing left to say "something was started".
+    this.pendingFile = join(this.collabDir, 'pending.json');
     this.gates = new Map();
     this.lastModePost = new Map();
     this.timeoutMs = Number(config.timeoutMs) > 0 ? Number(config.timeoutMs) : DEFAULT_TIMEOUT_MS;
@@ -2215,6 +2233,107 @@ class WorkBuddyBridge {
     }
   }
 
+  /**
+   * A round that never finished — cancelled, killed, or the host died before the
+   * result came back — has no transcript to parse, so `recordRun` cannot help.
+   * This writes what is known anyway (when, what was asked, why it ended): a
+   * failure that leaves no trace is indistinguishable from "nothing happened",
+   * and that is exactly the case a restart makes worse.
+   */
+  recordFailure(roundStartedAt, prompt, extra = {}) {
+    try {
+      mkdirSync(this.collabDir, { recursive: true });
+      const reason = typeof extra.error === 'string' && extra.error ? extra.error.slice(0, 600) : '（没有留下错误信息）';
+      const record = {
+        at: Date.now(),
+        ...(typeof roundStartedAt === 'number' ? { roundStartedAt } : {}),
+        status: 'failed',
+        mode: extra.mode === 'plan' || extra.mode === 'audit' ? extra.mode : 'task',
+        ...(typeof prompt === 'string' && prompt.trim() ? { prompt: prompt.trim().slice(0, 1000) } : {}),
+        ...(typeof extra.sessionId === 'string' && extra.sessionId ? { sessionId: extra.sessionId } : {}),
+        error: reason,
+        // The panel shows `summary`, so a failure reads as a failure there too.
+        summary: `这一轮没跑完：${reason}`,
+        steps: [],
+        stepCount: 0,
+      };
+      writeFileSync(join(this.collabDir, 'last-run.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+      appendFileSync(join(this.collabDir, 'runs.jsonl'), `${JSON.stringify(record)}\n`, 'utf8');
+      return record;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Note that a round is about to start. There is no matching "end": on startup
+   * the marker is compared against runs.jsonl, and only counts as a failure when
+   * no record with that `roundStartedAt` exists. That keeps the check honest
+   * without needing cleanup on every return path.
+   */
+  beginRound(roundStartedAt, prompt, mode) {
+    try {
+      mkdirSync(this.collabDir, { recursive: true });
+      const pending = this.#readPending();
+      pending[String(process.pid)] = {
+        at: Date.now(),
+        ...(typeof roundStartedAt === 'number' ? { roundStartedAt } : {}),
+        mode: mode === 'plan' || mode === 'audit' ? mode : 'task',
+        ...(typeof prompt === 'string' && prompt.trim() ? { prompt: prompt.trim().slice(0, 1000) } : {}),
+      };
+      writeFileSync(this.pendingFile, `${JSON.stringify(pending, null, 2)}\n`, 'utf8');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  #readPending() {
+    try {
+      const raw = JSON.parse(readFileSync(this.pendingFile, 'utf8'));
+      return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * A round that was in flight when the host died left no record — the process
+   * that would have written one is gone. Turn those markers into failed records
+   * so "it died halfway" is not indistinguishable from "nothing happened".
+   */
+  recoverPendingRounds() {
+    const pending = this.#readPending();
+    const entries = Object.values(pending).filter((entry) => entry && typeof entry === 'object');
+    if (entries.length === 0) return 0;
+    let finished = [];
+    try {
+      finished = readRunRecords(this.collabDir, 200);
+    } catch {
+      /* an unreadable log means every marker is unaccounted for */
+    }
+    let recovered = 0;
+    for (const entry of entries) {
+      const startedAt = typeof entry.roundStartedAt === 'number' ? entry.roundStartedAt : undefined;
+      // Anything recorded after the marker was written means the round reached a
+      // conclusion of its own (success or failure) — only silence is a crash.
+      const markerAt = typeof entry.at === 'number' ? entry.at : 0;
+      const finishedLater = finished.some((run) => run && typeof run.at === 'number' && run.at >= markerAt);
+      if (finishedLater) continue;
+      this.recordFailure(startedAt, entry.prompt ?? '', {
+        mode: entry.mode,
+        error: 'DSH 在上一轮收尾之前退出（重启或崩溃）——它可能已经改了一部分文件',
+      });
+      recovered += 1;
+    }
+    try {
+      writeFileSync(this.pendingFile, '{}\n', 'utf8');
+    } catch {
+      /* leaving a stale marker only means one extra warning next boot */
+    }
+    return recovered;
+  }
+
   /** The CLI bridge row and its editor, when that plugin is installed. */
   cliBridgeRow() {
     const editor = this.ctx.get('configEditor');
@@ -2430,6 +2549,9 @@ const taskOutput = {
 
 export function apply(ctx, config = {}) {
   const bridge = new WorkBuddyBridge(ctx, config);
+  // A round that was in flight when the last process died has no record of its
+  // own; turn those markers into failed rounds before anything else runs.
+  bridge.recoverPendingRounds();
 
   // A bridged round spends relay quota, so every path that reaches the CLI asks
   // for admission first and refuses *before* spawning anything when the window
@@ -2963,17 +3085,23 @@ export function apply(ctx, config = {}) {
         if (!admission.allowed) {
           return { text: refusal(admission), rejected: true, retryAfterSec: admission.retryAfterSec };
         }
+        bridge.beginRound(roundStartedAt, prompt, 'audit');
         let result;
         try {
           result = await commands.execute(exec.agent, `/codebuddy ${prompt}`, [], exec.signal);
         } catch (error) {
-          return { text: `调用 /codebuddy 失败：${error instanceof Error ? error.message : String(error)}` };
+          const reason = error instanceof Error ? error.message : String(error);
+          bridge.recordFailure(roundStartedAt, prompt, { mode: 'audit', error: reason });
+          return { text: `调用 /codebuddy 失败：${reason}` };
         }
         if (!result) return { text: '命令没解析成功——确认 dsh-connect-workbuddy 的 cliBridge 已打开、/codebuddy 存在。' };
         const failure = result.result?.kind === 'error' ? String(result.result.text ?? '') : '';
         if (failure) {
           const quota = readQuotaFailure(failure);
-          if (!quota) return { text: `这一轮失败：${failure}` };
+          if (!quota) {
+            bridge.recordFailure(roundStartedAt, prompt, { mode: 'audit', error: failure });
+            return { text: `这一轮失败：${failure}` };
+          }
           const cooldown = markQuota(exec, quota.retryAfterSec);
           return {
             text:
@@ -3142,11 +3270,16 @@ export function apply(ctx, config = {}) {
         if (!admission.allowed) {
           return { text: refusal(admission), rejected: true, retryAfterSec: admission.retryAfterSec };
         }
+        bridge.beginRound(roundStartedAt, prompt, planned ? 'plan' : 'task');
         let result;
         try {
           result = await commands.execute(exec.agent, line, [], exec.signal);
         } catch (error) {
-          return { text: `调用 /codebuddy 失败：${error instanceof Error ? error.message : String(error)}` };
+          const reason = error instanceof Error ? error.message : String(error);
+          // A cancelled or killed round may have edited files before dying; leave
+          // a trace so a restart cannot make the attempt look like nothing.
+          bridge.recordFailure(roundStartedAt, prompt, { mode: planned ? 'plan' : 'task', error: reason });
+          return { text: `调用 /codebuddy 失败：${reason}` };
         }
         if (!result) return { text: '命令没解析成功——确认 dsh-connect-workbuddy 的 cliBridge 已打开、/codebuddy 存在。' };
         const failure = result.result?.kind === 'error' ? String(result.result.text ?? '') : '';
@@ -3154,7 +3287,10 @@ export function apply(ctx, config = {}) {
           // Relay's own quota report outranks the local window: it is the only
           // one that knows when the global allowance comes back.
           const quota = readQuotaFailure(failure);
-          if (!quota) return { text: `CodeBuddy 这一轮失败：${failure}` };
+          if (!quota) {
+            bridge.recordFailure(roundStartedAt, prompt, { mode: planned ? 'plan' : 'task', error: failure });
+            return { text: `CodeBuddy 这一轮失败：${failure}` };
+          }
           const cooldown = markQuota(exec, quota.retryAfterSec);
           return {
             text:

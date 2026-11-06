@@ -1,7 +1,7 @@
 {
   "name": "dsh-codebuddy-bridge",
   "displayName": "CodeBuddy Bridge",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "把本机 CodeBuddy CLI（WorkBuddy 桌面版内置的那套引擎）接进 DSH：派活、结论回注、逐轮核对它到底改了什么。",
   "author": "donghao",
   "license": "MIT",
@@ -75,7 +75,7 @@
     "test"
   ],
   "scripts": {
-    "test": "node test/verify.test.mjs && node test/throttle.test.mjs && node test/plan.test.mjs && node test/usage.test.mjs && node test/time.test.mjs",
+    "test": "node test/verify.test.mjs && node test/throttle.test.mjs && node test/plan.test.mjs && node test/usage.test.mjs && node test/time.test.mjs && node test/failure.test.mjs",
     "prepublishOnly": "npm test && node --check index.js && node --check client.js"
   },
   "publishConfig": {
