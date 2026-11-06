@@ -46,6 +46,14 @@ dsh plugin --profile web add github:lunatic-eclipse/dsh-codebuddy-bridge
 
 - 已知遗留：格式检查里 `License file found but SPDX identifier could not be determined` 一直是 warning，
   但 GitHub 自己已识别为 MIT，安全扫描是 Pass（0 critical）。等 GitHub 索引完可以再跑一次检查。
+- **0.3.0 已于 2026-11-06 重新提交**（仓库通道，`✓ Submitted`，格式校验 5/5 Pass：仓库公开且活跃 / README / MIT /
+  cordis manifest / id 合法）。提交页只有一个输入框 + Entry type，**分类/版本/描述都从仓库读**，没有填写位。
+  提交时服务端重新拉取并重扫，钉的是当时的 commit（`2fc4de1`）。
+- 在此之前（2026-11-06 查 `cdn.dsh.so/market/index.json`）索引 135 条里**没有**本包，
+  说明 0.2.0 那次提交一直没被合并——所以 0.3.0 这次相当于第一次真正送审。
+- **合并前查不到是正常的**；合并后再查索引应出现 `versions[0].version = "0.3.0"`，
+  `source = {type:"git", url, commit}`。每天 20:00 的提醒会抓一次索引。
+- 之后再改代码 = 又一次新提交（服务端钉的是新 commit），不是改老条目。
 
 ## 发 npm（还没做，网络通再做）
 
