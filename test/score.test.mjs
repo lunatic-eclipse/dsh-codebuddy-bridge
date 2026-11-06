@@ -152,6 +152,42 @@ test('cost can be corrected afterwards, and the correction leaves a mark', () =>
   assert.throws(() => main(['amend', '--dir', dir, '--cost', '1', '--task', '不存在的题']), /没有可改的记录/);
 });
 
+test('task outcome is recorded separately from how good the plan read', () => {
+  // The point of these fields: a plan can score well and the task still fail.
+  const dir = scratch();
+  const add = (task, extra) =>
+    main(['add', '--dir', dir, '--task', task, '--score-self', '3,3,4,3,3', '--score-plan', '4,4,5,4,4', ...extra]);
+
+  add('任务甲', ['--outcome', 'pass', '--rework', '1', '--minutes', '30']);
+  add('任务乙', ['--outcome', 'fail', '--rework', '4', '--minutes', '90']);
+  add('任务丙', []); // no outcome recorded yet
+
+  const report = main(['report', '--dir', dir, '--json']);
+  const parsed = JSON.parse(report);
+  assert.equal(parsed.outcome.pass, 1);
+  assert.equal(parsed.outcome.fail, 1);
+  assert.equal(parsed.outcome.samples, 2, 'a record without an outcome must not count as a result');
+  assert.equal(parsed.rework.mean, 2.5);
+  assert.equal(parsed.minutes.mean, 60);
+
+  const text = main(['report', '--dir', dir]);
+  assert.match(text, /任务结果：通过 1 · 部分 0 · 未通过 1/);
+  assert.match(text, /人工返工：均值 2\.5 次/);
+  assert.match(text, /任务耗时：均值 60\.0 分钟/);
+});
+
+test('outcome rejects values that would quietly pollute the tally', () => {
+  const dir = scratch();
+  assert.throws(
+    () => main(['add', '--dir', dir, '--task', 'x', '--score-self', '1,1,1,1,1', '--score-plan', '1,1,1,1,1', '--outcome', 'ok']),
+    /--outcome 只能是/,
+  );
+  assert.throws(
+    () => main(['add', '--dir', dir, '--task', 'x', '--score-self', '1,1,1,1,1', '--score-plan', '1,1,1,1,1', '--rework', '-2']),
+    /--rework 必须是非负数字/,
+  );
+});
+
 after(() => {
   for (const dir of temporary) {
     try {

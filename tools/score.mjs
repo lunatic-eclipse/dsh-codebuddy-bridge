@@ -118,6 +118,11 @@ export function buildReport(records) {
       cost: typeof record.cost === 'number' ? record.cost : undefined,
       adopted: record.adopted ?? 'unknown',
       note: record.note ?? '',
+      // Task-level outcome, not plan-level quality. A plan can read well and the
+      // task still fail; keeping both is the whole point of the ledger.
+      outcome: record.outcome ?? undefined,
+      rework: typeof record.rework === 'number' ? record.rework : undefined,
+      minutes: typeof record.minutes === 'number' ? record.minutes : undefined,
     };
   });
 
@@ -157,6 +162,20 @@ export function buildReport(records) {
       total: costs.length ? costs.reduce((a, b) => a + b, 0) : undefined,
       samples: costs.length,
     },
+    outcome: {
+      pass: rows.filter((row) => row.outcome === 'pass').length,
+      partial: rows.filter((row) => row.outcome === 'partial').length,
+      fail: rows.filter((row) => row.outcome === 'fail').length,
+      samples: rows.filter((row) => typeof row.outcome === 'string').length,
+    },
+    rework: {
+      mean: mean(rows.map((row) => row.rework).filter((value) => typeof value === 'number')),
+      samples: rows.filter((row) => typeof row.rework === 'number').length,
+    },
+    minutes: {
+      mean: mean(rows.map((row) => row.minutes).filter((value) => typeof value === 'number')),
+      samples: rows.filter((row) => typeof row.minutes === 'number').length,
+    },
     adopted: {
       yes: rows.filter((row) => row.adopted === 'yes').length,
       partial: rows.filter((row) => row.adopted === 'partial').length,
@@ -187,6 +206,21 @@ export function renderReport(report) {
     `采纳情况：照做 ${report.adopted.yes} · 部分 ${report.adopted.partial} · 没照做 ${report.adopted.no}`,
   );
   lines.push(
+    report.outcome.samples > 0
+      ? `任务结果：通过 ${report.outcome.pass} · 部分 ${report.outcome.partial} · 未通过 ${report.outcome.fail}（${report.outcome.samples} 次有记录）`
+      : '任务结果：还没记（--outcome pass|partial|fail）',
+  );
+  lines.push(
+    report.rework.samples > 0
+      ? `人工返工：均值 ${fmt(report.rework.mean, 1)} 次（${report.rework.samples} 次有记录）`
+      : '人工返工：还没记（--rework N）',
+  );
+  lines.push(
+    report.minutes.samples > 0
+      ? `任务耗时：均值 ${fmt(report.minutes.mean, 1)} 分钟（${report.minutes.samples} 次有记录）`
+      : '任务耗时：还没记（--minutes N）',
+  );
+  lines.push(
     report.cost.samples > 0
       ? `成本：${report.cost.samples} 次共 ${fmt(report.cost.total, 2)} 积分（均值 ${fmt(report.cost.mean, 2)}）——只作参考，不参与打分`
       : '成本：还没记',
@@ -198,10 +232,15 @@ export function renderReport(report) {
 
 const USAGE = `用法：
   node tools/score.mjs add --task "问题" --self plans/self-x.md --plan plans/y.md \\
-       --score-self 4,3,5,4,4 --score-plan 3,2,5,3,3 [--cost 7.23] [--adopted yes|partial|no] [--note "..."]
+       --score-self 4,3,5,4,4 --score-plan 3,2,5,3,3 [--cost 7.23] [--adopted yes|partial|no] \\
+       [--outcome pass|partial|fail] [--rework N] [--minutes N] [--note "..."]
 
   node tools/score.mjs report [--dir <交换目录>] [--json]
-  node tools/score.mjs amend --cost 16.98 [--task <关键词>] [--note "..."] [--adopted yes|partial|no]
+  node tools/score.mjs amend --cost 16.98 [--task <关键词>] [--note "..."] [--adopted yes|partial|no] \\
+       [--outcome pass|partial|fail] [--rework N] [--minutes N]
+
+--outcome / --rework / --minutes 是**任务层**的字段，不是计划层的：
+计划写得漂亮而任务照样失败，正是这张账要能看见的事。
 
 amend 改的是**最近一条**（给了 --task 就改最近一条 task 含该关键词的）：
 积分是轮次结束后从余额差值读到的，事后修正属正常，但会留 amendedAt。
@@ -229,6 +268,29 @@ function parseArgs(argv) {
   return args;
 }
 
+const OUTCOMES = ['pass', 'partial', 'fail'];
+
+/** Task-level fields: a plan can read well while the task still fails. */
+function outcomeChanges(args) {
+  const changes = {};
+  if (args.outcome !== undefined) {
+    if (!OUTCOMES.includes(args.outcome)) {
+      throw new Error(`--outcome 只能是 ${OUTCOMES.join(' / ')}，收到 "${args.outcome}"`);
+    }
+    changes.outcome = args.outcome;
+  }
+  for (const [flag, key] of [
+    ['rework', 'rework'],
+    ['minutes', 'minutes'],
+  ]) {
+    if (args[flag] === undefined) continue;
+    const value = Number(args[flag]);
+    if (!Number.isFinite(value) || value < 0) throw new Error(`--${flag} 必须是非负数字，收到 "${args[flag]}"`);
+    changes[key] = value;
+  }
+  return changes;
+}
+
 export function main(argv) {
   const args = parseArgs(argv);
   const command = args._[0];
@@ -246,6 +308,7 @@ export function main(argv) {
       ...(args.cost !== undefined ? { cost: Number(args.cost) } : {}),
       ...(typeof args.adopted === 'string' ? { adopted: args.adopted } : {}),
       ...(typeof args.note === 'string' ? { note: args.note } : {}),
+      ...outcomeChanges(args),
     };
     if (record.cost !== undefined && !Number.isFinite(record.cost)) throw new Error(`--cost 必须是数字，收到 "${args.cost}"`);
     appendRecord(store, record);
@@ -254,7 +317,7 @@ export function main(argv) {
 
   if (command === 'amend') {
     // The balance delta arrives after the fact; correcting it must be explicit.
-    const changes = {};
+    const changes = { ...outcomeChanges(args) };
     if (args.cost !== undefined) {
       const cost = Number(args.cost);
       if (!Number.isFinite(cost)) throw new Error(`--cost 必须是数字，收到 "${args.cost}"`);
@@ -262,7 +325,9 @@ export function main(argv) {
     }
     if (typeof args.note === 'string') changes.note = args.note;
     if (typeof args.adopted === 'string') changes.adopted = args.adopted;
-    if (Object.keys(changes).length === 0) throw new Error('amend 至少要给 --cost / --note / --adopted 之一');
+    if (Object.keys(changes).length === 0) {
+      throw new Error('amend 至少要给 --cost / --note / --adopted / --outcome / --rework / --minutes 之一');
+    }
     const taskFilter = typeof args.task === 'string' ? args.task : undefined;
     const result = amendRecord(store, {
       match: (record) => (taskFilter === undefined ? true : String(record.task ?? '').includes(taskFilter)),
