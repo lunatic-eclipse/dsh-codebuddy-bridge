@@ -167,6 +167,23 @@ test('the conclusion lands in plans/ with the question it answered', async () =>
   }
 });
 
+test('a long conclusion is stored whole, not cut at the 500-char summary cap', async () => {
+  // record.summary is capped at 500 chars as an index; a plan's file is the
+  // deliverable, so the tail has to survive. A real run found this by ending a
+  // stored plan mid-sentence.
+  const conclusion = `${'规划正文，'.repeat(200)}结尾哨兵-COMPLETE`;
+  assert.ok(conclusion.length > 1000);
+  const h = harness({ summary: conclusion });
+  try {
+    await h.execute('workbuddy_relay', { prompt: '写一份很长的规划', mode: 'plan' });
+    const stored = readFileSync(h.planFile(), 'utf8');
+    assert.ok(stored.includes('结尾哨兵-COMPLETE'), 'the tail must survive the 500-char summary cap');
+    assert.ok(stored.length > 1000, `stored ${stored.length} chars`);
+  } finally {
+    h.dispose();
+  }
+});
+
 test('two plans inside one second do not overwrite each other', async () => {
   const h = harness();
   try {

@@ -292,6 +292,43 @@ function writeModes(file, modes) {
   }
 }
 
+/**
+ * The whole conclusion of the last assistant turn, straight from the transcript.
+ *
+ * `record.summary` is capped at 500 characters when the CLI session is parsed —
+ * fine as an index, fatal as a deliverable: a plan is exactly the case where the
+ * conclusion is long. So plan mode rereads the transcript and takes the last
+ * assistant message whole.
+ */
+function readFullConclusion(file) {
+  if (!file) return undefined;
+  let raw;
+  try {
+    raw = readFileSync(file, 'utf8');
+  } catch {
+    return undefined;
+  }
+  let text = '';
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event?.type !== 'message' || event.role !== 'assistant') continue;
+    const next = (Array.isArray(event.content) ? event.content : [])
+      .filter((block) => block?.type === 'output_text' && typeof block.text === 'string')
+      .map((block) => block.text)
+      .join('\n')
+      .trim();
+    // Like parseCliSession: the last assistant message is the answer.
+    if (next) text = next;
+  }
+  return text || undefined;
+}
+
 // --- Plan rounds (0.3, after M3) --------------------------------------------
 //
 // A plan round answers "what should we do", so its conclusion is the deliverable.
@@ -2760,7 +2797,7 @@ export function apply(ctx, config = {}) {
           if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 300));
           if (sessionMatch) record = bridge.recordRun(sessionMatch[1], roundStartedAt, prompt, { mode: 'plan' });
         }
-        const conclusion = String(record?.summary ?? '').trim();
+        const conclusion = (readFullConclusion(record?.file) ?? String(record?.summary ?? '')).trim();
         const stored = writePlanFile(bridge.collabDir, {
           at: roundStartedAt,
           prompt,
