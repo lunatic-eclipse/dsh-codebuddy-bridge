@@ -3,6 +3,8 @@
 ## 未发布（0.3 开发中）
 
 - `workbuddy_review(path, focus?, maxFindings?)`：只读审查固化成工具，固定模板 + 自动 UNREAD 核对。
+- `workbuddy_review` 返回「结论 + 核对」两段，一次调用自足；转录竞态最多重试 4 次。
+- 探索性读取失败（Read 不存在的文件）降级为 WARN，写失败仍是 FAIL。
 - verify 新增 UNREAD 判定：纯审查轮核对该读的文件到底读没读。
 - 审查轮记录 prompt 与 `requested` 文件列表，供 UNREAD 使用。
 

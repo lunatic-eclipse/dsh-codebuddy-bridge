@@ -935,9 +935,15 @@ export function verifyRound(dir, options = {}) {
 
   for (const [callId, failure] of failures.slice(0, 5)) {
     const name = callNames.get(callId) ?? '工具';
-    push('FAIL', `工具调用失败：${name}`, [
-      failure.text ? `返回：${failure.text.slice(0, 120)}` : `status=${failure.status}`,
-    ]);
+    // A failed look (Read of a path that does not exist, a Glob that matched
+    // nothing) is exploration, not evidence of a fake report.
+    const exploring = ['Read', 'ReadImage', 'LS', 'Glob', 'Grep'].includes(name);
+    const detail = failure.text ? `返回：${failure.text.slice(0, 120)}` : `status=${failure.status}`;
+    if (exploring) {
+      push('WARN', `${name} 调用失败（探索性）`, [detail]);
+    } else {
+      push('FAIL', `工具调用失败：${name}`, [detail]);
+    }
   }
 
   const seconds = window ? Math.max(0, Math.round((window.to - window.from) / 1000)) : undefined;

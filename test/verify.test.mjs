@@ -234,6 +234,56 @@ test('focus and maxFindings only add detail, never drop the core rules', () => {
   assert.match(prompt, /不要修改任何文件/);
 });
 
+test('a failed exploration read is a WARN; a failed write stays a FAIL', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cbb-failread-'));
+  const note = join(dir, 'note.md');
+  writeFileSync(note, 'x\n', 'utf8');
+  const missing = join(dir, 'missing.md');
+  const events = [
+    { type: 'message', role: 'user', timestamp: T0, cwd: dir, content: [{ type: 'input_text', text: 'go' }] },
+    {
+      type: 'function_call',
+      name: 'Read',
+      callId: 'r1',
+      timestamp: T0 + 1000,
+      arguments: JSON.stringify({ file_path: missing }),
+    },
+    {
+      type: 'function_call_result',
+      name: 'Read',
+      callId: 'r1',
+      status: 'error',
+      timestamp: T0 + 1100,
+      output: { type: 'text', text: 'File does not exist.' },
+    },
+    {
+      type: 'function_call',
+      name: 'Edit',
+      callId: 'e1',
+      timestamp: T0 + 2000,
+      arguments: JSON.stringify({ file_path: note }),
+    },
+    {
+      type: 'function_call_result',
+      name: 'Edit',
+      callId: 'e1',
+      status: 'error',
+      timestamp: T0 + 2100,
+      output: { type: 'text', text: 'denied' },
+    },
+  ];
+  const transcript = join(dir, 'session.jsonl');
+  writeFileSync(transcript, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`, 'utf8');
+  writeFileSync(
+    join(dir, 'runs.jsonl'),
+    `${JSON.stringify({ at: T0 + 3000, sessionId: 'failread', file: transcript, summary: '审完了', startedAt: T0, endedAt: T0 + 3000 })}\n`,
+    'utf8',
+  );
+  const text = verifyRound(dir, {}).text;
+  assert.match(text, /\[WARN\] Read 调用失败（探索性）/);
+  assert.match(text, /\[FAIL\] 工具调用失败：Edit/);
+});
+
 test('rounds of one CLI session do not bleed into each other', () => {
   const dir = mkdtempSync(join(tmpdir(), 'cbb-isolation-'));
   const file = join(dir, 'note.md');

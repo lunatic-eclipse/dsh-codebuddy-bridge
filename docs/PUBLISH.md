@@ -15,7 +15,7 @@ node --check index.js; node --check client.js
 然后记账、提交、推送：
 
 ```powershell
-# 1. 改 package.json 的 version，并在 CHANGELOG.md 顶部加一条
+# 先把 package.json 的 version 和 CHANGELOG.md 改好，再：
 git add -A
 git commit -m "feat: 一句话说清改了什么"
 ```
@@ -53,7 +53,7 @@ npm login                       # 或用带 bypass 2FA 的 granular token
 npm publish                     # package.json 里 publishConfig 已指向官方源
 ```
 
-发布前先 `npm pack --dry-run`，确认 18 个文件里包含 `cordis.patch.yml`、`client.js`、`docs/assets/*.png`。
+发布前先 `npm pack --dry-run`，确认输出里包含 `cordis.patch.yml`、`client.js`、`docs/assets/` 下的截图和 `LICENSE`。
 
 ## 踩过的坑（按出现频率）
 
