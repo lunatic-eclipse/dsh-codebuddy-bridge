@@ -128,6 +128,30 @@ test('a bad --cost is rejected instead of silently becoming NaN', () => {
   );
 });
 
+test('cost can be corrected afterwards, and the correction leaves a mark', () => {
+  const dir = scratch();
+  const add = (task, cost) =>
+    main(['add', '--dir', dir, '--task', task, '--score-self', '4,3,4,3,3', '--score-plan', '4,4,5,4,4', '--cost', cost]);
+  add('第一题', '18');
+  add('第二题', '9');
+
+  const out = main(['amend', '--dir', dir, '--cost', '16.98']);
+  assert.match(out, /9 → 16\.98/, 'amend without --task targets the most recent record');
+
+  const records = readRecords(join(dir, 'scores.jsonl'));
+  assert.equal(records.length, 2, 'amending must not drop records');
+  assert.equal(records[1].cost, 16.98, 'the last record is the one corrected');
+  assert.equal(records[0].cost, 18, 'earlier records are untouched');
+  assert.ok(typeof records[1].amendedAt === 'number', 'a correction is visible, not silent');
+
+  // Target a specific entry instead of the last one.
+  main(['amend', '--dir', dir, '--cost', '17.5', '--task', '第一题']);
+  assert.equal(readRecords(join(dir, 'scores.jsonl'))[0].cost, 17.5);
+
+  assert.throws(() => main(['amend', '--dir', dir]), /至少要给/);
+  assert.throws(() => main(['amend', '--dir', dir, '--cost', '1', '--task', '不存在的题']), /没有可改的记录/);
+});
+
 after(() => {
   for (const dir of temporary) {
     try {

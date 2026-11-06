@@ -26,7 +26,7 @@
  *
  * Records live in <exchange dir>/scores.jsonl (default ~/.dsh/codebuddy-bridge).
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -80,6 +80,26 @@ export function readRecords(file) {
     }
   }
   return records;
+}
+
+export function rewriteRecords(file, records) {
+  writeFileSync(file, records.map((record) => JSON.stringify(record)).join('\n') + (records.length ? '\n' : ''), 'utf8');
+  return records.length;
+}
+
+/**
+ * Costs cannot be known when the round ends — they come from a balance delta the
+ * user reads afterwards. Amending keeps that honest: the ledger is append-only by
+ * default, and a correction is explicit rather than a silent re-write.
+ */
+export function amendRecord(file, { match, changes }) {
+  const records = readRecords(file);
+  const index = records.findLastIndex((record) => match(record));
+  if (index === -1) return undefined;
+  const before = records[index];
+  records[index] = { ...before, ...changes, amendedAt: Date.now() };
+  rewriteRecords(file, records);
+  return { before, after: records[index] };
 }
 
 const mean = (values) => (values.length === 0 ? undefined : values.reduce((a, b) => a + b, 0) / values.length);
@@ -181,6 +201,10 @@ const USAGE = `用法：
        --score-self 4,3,5,4,4 --score-plan 3,2,5,3,3 [--cost 7.23] [--adopted yes|partial|no] [--note "..."]
 
   node tools/score.mjs report [--dir <交换目录>] [--json]
+  node tools/score.mjs amend --cost 16.98 [--task <关键词>] [--note "..."] [--adopted yes|partial|no]
+
+amend 改的是**最近一条**（给了 --task 就改最近一条 task 含该关键词的）：
+积分是轮次结束后从余额差值读到的，事后修正属正常，但会留 amendedAt。
 
 维度顺序：${DIMENSIONS.map((d) => `${DIMENSION_LABELS[d]}`).join(' / ')}（各 1–5 分）
 分数例子：--score-self 4,3,5,4,4 表示 可执行4/反例3/诚实5/密度4/照做4`;
@@ -226,6 +250,26 @@ export function main(argv) {
     if (record.cost !== undefined && !Number.isFinite(record.cost)) throw new Error(`--cost 必须是数字，收到 "${args.cost}"`);
     appendRecord(store, record);
     return `已记录：${record.task}\n分数：自己 [${record.self.join(',')}] · WorkBuddy [${record.plan.join(',')}]\n存到：${store}`;
+  }
+
+  if (command === 'amend') {
+    // The balance delta arrives after the fact; correcting it must be explicit.
+    const changes = {};
+    if (args.cost !== undefined) {
+      const cost = Number(args.cost);
+      if (!Number.isFinite(cost)) throw new Error(`--cost 必须是数字，收到 "${args.cost}"`);
+      changes.cost = cost;
+    }
+    if (typeof args.note === 'string') changes.note = args.note;
+    if (typeof args.adopted === 'string') changes.adopted = args.adopted;
+    if (Object.keys(changes).length === 0) throw new Error('amend 至少要给 --cost / --note / --adopted 之一');
+    const taskFilter = typeof args.task === 'string' ? args.task : undefined;
+    const result = amendRecord(store, {
+      match: (record) => (taskFilter === undefined ? true : String(record.task ?? '').includes(taskFilter)),
+      changes,
+    });
+    if (!result) throw new Error(`账本里没有可改的记录${taskFilter ? `（task 含 "${taskFilter}"）` : ''}`);
+    return `已修正：${result.after.task}\n成本：${result.before.cost ?? '—'} → ${result.after.cost ?? '—'}\n存到：${store}`;
   }
 
   if (command === 'report' || command === 'list') {
