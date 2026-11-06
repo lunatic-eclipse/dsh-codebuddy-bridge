@@ -19,9 +19,27 @@ import { homedir } from 'node:os';
 // zstd landed in node:zlib on Node 22.15+; DSH runs 24, so the session log is
 // readable here. Older runtimes simply get "available: false" from the report.
 import * as zlib from 'node:zlib';
+import { fileURLToPath } from 'node:url';
 
 export const name = 'codebuddy-bridge';
 export const inject = ['tools', 'webServer'];
+
+/** Where this plugin lives, so it can serve its own docs to a fresh session. */
+const PLUGIN_ROOT = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * The brief a brand-new DSH session needs before touching this plugin: the
+ * division of labour, the three hard constraints (dontAsk, 7-27 credits, 6
+ * rounds/hour), what is already done, and what is next. Kept in a file so it can
+ * be edited without touching code.
+ */
+export function readContextBrief() {
+  try {
+    return readFileSync(join(PLUGIN_ROOT, 'docs', 'CONTEXT.md'), 'utf8').trim();
+  } catch {
+    return '（找不到 docs/CONTEXT.md；请看 plugins\\workbuddy-bridge\\HANDOFF.md 第七节）';
+  }
+}
 
 /** Candidate engine entry points, most specific first. */
 const CLI_CANDIDATES = [
@@ -2692,6 +2710,26 @@ export function apply(ctx, config = {}) {
     bridge.applyGate(agent);
   });
   bridge.refreshGates();
+
+  ctx.effect(() =>
+    ctx.tools.register({
+      name: 'workbuddy_context',
+      description:
+        '第一次在这个会话里碰到这个插件时，先调它一次：返回一分钟能读完的项目简报——' +
+        '分工（它是外脑、DSH 是手）、三条硬约束（permissionMode 必须 dontAsk、一轮 7–27 积分且不可预估、' +
+        '每会话 6 轮/小时）、已完成与待办、以及"怎么问它才有用"的实测结论。纯本地读文件，不花额度。',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      output: {
+        schema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+        render(_args, value) {
+          return [{ type: 'text', text: value.text }];
+        },
+      },
+      async execute() {
+        return { text: readContextBrief() };
+      },
+    }),
+  );
 
   ctx.effect(() =>
     ctx.tools.register({
