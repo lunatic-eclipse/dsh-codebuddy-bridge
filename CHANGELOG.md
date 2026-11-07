@@ -11,6 +11,9 @@
 - **`workbuddy_status` 不再把两个路径混成一个数**：分两行报——`workbuddy_task` 直连的，和 relay/review 走
   `/codebuddy`（由 `cliBridge.permissionMode` 决定）的。之前只报前者，读起来像是全局生效。
 - 新增 `test/permission.test.mjs`（4 例），钉住默认值、配置覆盖、以及非法模式被拒。
+- **账本能收"只有任务层"的记录**：`add` 以前强制要两组五个分数，于是"派一轮只读复核"这种没有第二份计划可比的轮次
+  根本记不进来。现在可以 `add --task ... --outcome pass --rework 1 --minutes 17`；这类记录只进任务层统计，
+  不计入计划层均值与胜负（不然它会变成一条 0:0 的"平"）。首条已记：0.3.2 权限修复 = `pass · 返工 1 · 17 分钟`。
 
 ## 0.3.1 — 2026-11-06
 
