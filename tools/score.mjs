@@ -126,11 +126,18 @@ export function buildReport(records) {
     };
   });
 
+  // Not every record is a two-plan comparison: a task has an outcome and no
+  // plan to score. Those rows must not be counted as 0:0 ties — that would
+  // quietly rewrite the win/tie record while looking like extra data.
+  const scored = rows.filter(
+    (row) => row.self.length === DIMENSIONS.length && row.plan.length === DIMENSIONS.length,
+  );
+
   const perDimension = DIMENSIONS.map((dimension, index) => {
-    const self = rows.map((row) => row.self[index]).filter((value) => typeof value === 'number');
-    const plan = rows.map((row) => row.plan[index]).filter((value) => typeof value === 'number');
-    const planWins = rows.filter((row) => row.plan[index] > row.self[index]).length;
-    const selfWins = rows.filter((row) => row.self[index] > row.plan[index]).length;
+    const self = scored.map((row) => row.self[index]).filter((value) => typeof value === 'number');
+    const plan = scored.map((row) => row.plan[index]).filter((value) => typeof value === 'number');
+    const planWins = scored.filter((row) => row.plan[index] > row.self[index]).length;
+    const selfWins = scored.filter((row) => row.self[index] > row.plan[index]).length;
     return {
       dimension,
       label: DIMENSION_LABELS[dimension],
@@ -138,24 +145,26 @@ export function buildReport(records) {
       planMean: mean(plan),
       planWins,
       selfWins,
-      ties: rows.length - planWins - selfWins,
+      ties: scored.length - planWins - selfWins,
     };
   });
 
-  const planWinsOverall = rows.filter((row) => row.planTotal > row.selfTotal).length;
-  const selfWinsOverall = rows.filter((row) => row.selfTotal > row.planTotal).length;
+  const planWinsOverall = scored.filter((row) => row.planTotal > row.selfTotal).length;
+  const selfWinsOverall = scored.filter((row) => row.selfTotal > row.planTotal).length;
   const costs = rows.map((row) => row.cost).filter((value) => typeof value === 'number');
 
   return {
     count: rows.length,
+    scored: scored.length,
+    taskOnly: rows.length - scored.length,
     rows,
     perDimension,
     overall: {
       planWins: planWinsOverall,
       selfWins: selfWinsOverall,
-      ties: rows.length - planWinsOverall - selfWinsOverall,
-      selfMeanTotal: mean(rows.map((row) => row.selfTotal)),
-      planMeanTotal: mean(rows.map((row) => row.planTotal)),
+      ties: scored.length - planWinsOverall - selfWinsOverall,
+      selfMeanTotal: mean(scored.map((row) => row.selfTotal)),
+      planMeanTotal: mean(scored.map((row) => row.planTotal)),
     },
     cost: {
       mean: mean(costs),
@@ -189,7 +198,9 @@ const fmt = (value, digits = 2) => (typeof value === 'number' ? value.toFixed(di
 export function renderReport(report) {
   if (report.count === 0) return '还没有打过分。先跑 node tools/score.mjs add --help 看用法。';
   const lines = [
-    `已打分 ${report.count} 次`,
+    report.taskOnly > 0
+      ? `已打分 ${report.scored} 次 · 另有 ${report.taskOnly} 条只记任务层（不参与计划层均值与胜负）`
+      : `已打分 ${report.count} 次`,
     '',
     `维度        DSH 自己   WorkBuddy   WorkBuddy 赢 / 自己赢 / 平`,
   ];
@@ -225,8 +236,8 @@ export function renderReport(report) {
       ? `成本：${report.cost.samples} 次共 ${fmt(report.cost.total, 2)} 积分（均值 ${fmt(report.cost.mean, 2)}）——只作参考，不参与打分`
       : '成本：还没记',
   );
-  if (report.count < 5) lines.push('');
-  if (report.count < 5) lines.push(`样本只有 ${report.count} 次，别下结论；到 5 次以上再看趋势。`);
+  if (report.scored < 5) lines.push('');
+  if (report.scored < 5) lines.push(`样本只有 ${report.scored} 次，别下结论；到 5 次以上再看趋势。`);
   return lines.join('\n');
 }
 
@@ -235,12 +246,17 @@ const USAGE = `用法：
        --score-self 4,3,5,4,4 --score-plan 3,2,5,3,3 [--cost 7.23] [--adopted yes|partial|no] \\
        [--outcome pass|partial|fail] [--rework N] [--minutes N] [--note "..."]
 
+  node tools/score.mjs add --task "做成了什么" --outcome pass|partial|fail \\
+       [--rework N] [--minutes N] [--cost N] [--note "..."]        # 只记任务层
+
   node tools/score.mjs report [--dir <交换目录>] [--json]
   node tools/score.mjs amend --cost 16.98 [--task <关键词>] [--note "..."] [--adopted yes|partial|no] \\
        [--outcome pass|partial|fail] [--rework N] [--minutes N]
 
 --outcome / --rework / --minutes 是**任务层**的字段，不是计划层的：
 计划写得漂亮而任务照样失败，正是这张账要能看见的事。
+没有第二份计划可比时可以不打分（只给 --outcome）：这种记录只进任务层统计，
+不参与计划层的均值与胜负——否则它会变成一条 0:0 的"平"。
 
 amend 改的是**最近一条**（给了 --task 就改最近一条 task 含该关键词的）：
 积分是轮次结束后从余额差值读到的，事后修正属正常，但会留 amendedAt。
@@ -298,11 +314,27 @@ export function main(argv) {
 
   if (command === 'add') {
     if (args.help === true) return USAGE;
+    // "Did the task work" is a different question from "which draft read
+    // better". Forcing ten scores onto a record that has no second draft would
+    // mean inventing them, and a fake 0:0 row silently becomes a tie in the
+    // win/loss column. So: both score sets, or none plus an outcome.
+    const hasSelf = args['score-self'] !== undefined;
+    const hasPlan = args['score-plan'] !== undefined;
+    if (hasSelf !== hasPlan) {
+      throw new Error('--score-self 和 --score-plan 要一起给，或者都不给（只记任务层）');
+    }
+    if (!hasSelf && args.outcome === undefined) {
+      throw new Error('不带分数的记录必须给 --outcome pass|partial|fail，否则这条记录没有内容');
+    }
     const record = {
       at: Date.now(),
       task: typeof args.task === 'string' ? args.task : '（未写）',
-      self: parseScores(args['score-self'], 'DSH 自己的'),
-      plan: parseScores(args['score-plan'], 'WorkBuddy 的'),
+      ...(hasSelf
+        ? {
+            self: parseScores(args['score-self'], 'DSH 自己的'),
+            plan: parseScores(args['score-plan'], 'WorkBuddy 的'),
+          }
+        : {}),
       selfFile: typeof args.self === 'string' ? args.self : undefined,
       planFile: typeof args.plan === 'string' ? args.plan : undefined,
       ...(args.cost !== undefined ? { cost: Number(args.cost) } : {}),
@@ -312,6 +344,13 @@ export function main(argv) {
     };
     if (record.cost !== undefined && !Number.isFinite(record.cost)) throw new Error(`--cost 必须是数字，收到 "${args.cost}"`);
     appendRecord(store, record);
+    if (!hasSelf) {
+      return [
+        `已记录（任务层）：${record.task}`,
+        `结果：${record.outcome}${record.rework !== undefined ? ` · 返工 ${record.rework} 次` : ''}${record.minutes !== undefined ? ` · ${record.minutes} 分钟` : ''}`,
+        `存到：${store}`,
+      ].join('\n');
+    }
     return `已记录：${record.task}\n分数：自己 [${record.self.join(',')}] · WorkBuddy [${record.plan.join(',')}]\n存到：${store}`;
   }
 

@@ -301,6 +301,17 @@ function readState(dir) {
   }
 }
 
+/**
+ * What a status line should report. The running session wins, because a per-call
+ * override (`workbuddy_task({ permissionMode })`) is a startup argument that the
+ * configured default does not describe — reporting the default there would say
+ * `dontAsk` while the live process is allowed to write.
+ */
+function livePermissionMode(session, fallback) {
+  const running = session && !session.disposed ? session.options?.permissionMode : undefined;
+  return running ? `${running}（当前会话）` : `${fallback}（默认，会话未启动）`;
+}
+
 function writeState(dir, state) {
   try {
     mkdirSync(dir, { recursive: true });
@@ -2840,9 +2851,12 @@ export function apply(ctx, config = {}) {
           `引擎：${bridge.cliPath ?? '（未找到）'}`,
           `产品配置：${bridge.productConfig ?? '（未使用）'}`,
           `认证：${bridge.authToken ? '环境变量 CODEBUDDY_AUTH_TOKEN' : bridge.apiKey ? '环境变量 CODEBUDDY_API_KEY' : '引擎自身登录态（需先在 WorkBuddy 引擎里 /login）'}`,
-          `权限模式（本插件直连 / workbuddy_task）：${bridge.defaults.permissionMode}`,
-          '权限模式（relay / review 走 /codebuddy）：由 dsh-connect-workbuddy 的 cliBridge.permissionMode 决定'
-            + '（默认 dontAsk，`--edit` 那一轮转 acceptEdits）',
+          `权限模式（本插件直连 / workbuddy_task）：${livePermissionMode(session, bridge.defaults.permissionMode)}`,
+          // This bridge cannot read the other plugin's config, so it must not
+          // state that value as fact — a stale hardcoded default here would be
+          // the same class of lie the status line exists to prevent.
+          '权限模式（relay / review 走 /codebuddy）：由 dsh-connect-workbuddy 的 cliBridge.permissionMode 决定，'
+            + '本插件读不到那份配置（出厂默认 dontAsk；`--edit` 那一轮由 relay 自己转 acceptEdits）',
           `工作目录：${session?.options?.cwd ?? bridge.defaults.cwd}`,
           `当前会话：${session ? (session.disposed ? '已关闭' : session.sessionId ?? '已启动，尚未产生会话 ID') : '未启动'}`,
           `交换目录：${bridge.collabDir}`,

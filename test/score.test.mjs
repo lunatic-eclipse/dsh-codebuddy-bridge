@@ -188,6 +188,65 @@ test('outcome rejects values that would quietly pollute the tally', () => {
   );
 });
 
+test('a task can be recorded with no plan comparison at all', () => {
+  const dir = scratch();
+  const out = main([
+    'add',
+    '--dir',
+    dir,
+    '--task',
+    '审 0.3.2 的权限修复',
+    '--outcome',
+    'pass',
+    '--rework',
+    '1',
+    '--minutes',
+    '25',
+  ]);
+  assert.match(out, /已记录（任务层）/);
+
+  const parsed = JSON.parse(main(['report', '--dir', dir, '--json']));
+  assert.equal(parsed.count, 1);
+  assert.equal(parsed.scored, 0, 'a record without two drafts is not a scored record');
+  assert.equal(parsed.taskOnly, 1);
+  assert.equal(parsed.outcome.pass, 1);
+  assert.equal(parsed.rework.mean, 1);
+  assert.equal(parsed.minutes.mean, 25);
+  assert.equal(parsed.overall.ties, 0, 'it must not show up as a 0:0 tie');
+  assert.equal(parsed.overall.selfMeanTotal, undefined);
+});
+
+test('a scoreless record still needs an outcome, or it records nothing', () => {
+  const dir = scratch();
+  assert.throws(
+    () => main(['add', '--dir', dir, '--task', 'x']),
+    /必须给 --outcome/,
+  );
+  // Half a comparison is a typo, not a new kind of record.
+  assert.throws(
+    () => main(['add', '--dir', dir, '--task', 'x', '--score-self', '1,1,1,1,1', '--outcome', 'pass']),
+    /要一起给，或者都不给/,
+  );
+});
+
+test('mixing scored and scoreless records keeps the plan averages honest', () => {
+  const dir = scratch();
+  main(['add', '--dir', dir, '--task', '甲', '--score-self', '4,4,4,4,4', '--score-plan', '2,2,2,2,2']);
+  main(['add', '--dir', dir, '--task', '乙', '--score-self', '2,2,2,2,2', '--score-plan', '4,4,4,4,4']);
+  main(['add', '--dir', dir, '--task', '丙（只记任务层）', '--outcome', 'fail']);
+
+  const report = buildReport(readRecords(join(dir, 'scores.jsonl')));
+  assert.equal(report.count, 3);
+  assert.equal(report.scored, 2);
+  assert.equal(report.taskOnly, 1);
+  assert.equal(report.overall.planWins, 1);
+  assert.equal(report.overall.selfWins, 1);
+  assert.equal(report.overall.ties, 0, 'the scoreless row must not be counted as a tie');
+  assert.equal(report.overall.selfMeanTotal, 15, 'the mean is over the two scored rows, not three');
+  assert.equal(report.outcome.samples, 1);
+  assert.match(renderReport(report), /另有 1 条只记任务层/);
+});
+
 after(() => {
   for (const dir of temporary) {
     try {
