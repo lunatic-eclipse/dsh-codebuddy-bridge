@@ -320,7 +320,7 @@ Node 22.15+ 才能解；DSH 跑 24 所以没问题）。面板每 4 秒随 `/las
 | `collabDir` | `…\default-workspace\.collab` | 交换目录 / 模式 / 运行记录都在这 |
 | `watchMs` | 3000 | 兜底通道看门狗的轮询间隔 |
 | `env.WORKBUDDY_CONFIG_DIR` | `C:\Users\donghao\.workbuddy` | 直连引擎用（当前用不到） |
-| `permissionMode` | `acceptEdits` | 直连引擎用 |
+| `permissionMode` | `dontAsk` | 直连引擎（`workbuddy_task`）用；要它改文件就显式传 `acceptEdits` |
 | `cliPath` / `productConfig` | 自动探测 | 直连引擎入口 |
 | `authToken` / `apiKey` | 空 | 有凭据才填 |
 

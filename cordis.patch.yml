@@ -6,4 +6,7 @@
     - id: codebuddy-bridge
       name: dsh-codebuddy-bridge
       config:
-        permissionMode: acceptEdits
+        # Read tools are auto-approved, writes are refused, and nothing ever waits
+        # for a human. Editing a round is an explicit opt-in (`--edit` on the relay
+        # route, `permissionMode: acceptEdits` on workbuddy_task), never the default.
+        permissionMode: dontAsk

@@ -9,8 +9,10 @@
 
 ## 三条硬约束
 
-1. **`permissionMode` 必须是 `dontAsk`**——只有它自动放行 Read/Grep；`acceptEdits` 会让读工具进审批队列，
-   无人值守时卡住（实测报 `no human is at the terminal to approve tool use`）。
+1. **只读轮必须 `dontAsk`**——它自动放行读工具、直接拒掉写工具，永不等人；`acceptEdits` 会让要审批的工具
+   挂起等人，无人值守时卡死（实测报 `no human is at the terminal to approve tool use`）。
+   两个路径各自设，别混：relay/review 走 `/codebuddy`（cliBridge 默认 `dontAsk`，`--edit` 那一轮转 `acceptEdits`）；
+   `workbuddy_task` 直连引擎，默认也是 `dontAsk`，要它真改文件就显式传 `permissionMode="acceptEdits"`。
 2. **一轮很贵且不可预测**：实测 7–27 积分、均值约 16.5。思考 token 计费但转录里看不到，
    **不要用 token 数估算成本**，只能事后对余额。
 3. **额度**：每 DSH 会话每小时 6 轮（relay + review 共用），超限直接拒、不花额度。
@@ -31,11 +33,11 @@
 用量报表、面板"思考 vs WorkBuddy"时间拆分、打分账本（`tools/score.mjs`）、
 **就是你现在正在读的这个工具**（`workbuddy_context`，2026-11-06 加）。
 
-测试：8 套 **68 例**（`npm test`，本机 Node 20 会跳过 2 例 zstd，DSH 的 Node 24 全跑）。
+测试：9 套 **72 例**（`npm test`，本机 Node 20 会跳过 2 例 zstd，DSH 的 Node 24 全跑）。
 
-## 当前状态（2026-11-06 21:10）
+## 当前状态（2026-11-07 10:40）
 
-- 版本 **0.3.1**，**0 个待推提交**（已全部推上去）；
+- 版本 **0.3.2**：默认权限模式修回 `dontAsk`，`workbuddy_task` 加了 `permissionMode` 显式开关；
 - 账本 **4 条**：总分 17.8 : 21.3，WorkBuddy 4:0 全胜；**任务层三个字段还一条都没记**；
 - 最新两条来自"酒馆"任务（20:17 / 20:39），说明账本已经在真实对话里用了。
 
@@ -44,7 +46,7 @@
 1. **补任务层字段**：挑 2 个真实任务，各写一句验收标准，做完用
    `node tools\score.mjs add|amend ... --outcome pass|partial|fail --rework N --minutes N` 记——
    现在 4 条里一条都没有，所以"协作到底省不省事"还答不了；
-2. 市场：0.3.0 已提交等合并；**0.3.1 之后要再提交一次**；
+2. 市场：0.3.0 已提交等合并；**0.3.2 要再提交一次**（默认权限模式是行为变化，值得写进说明）；
 3. **没验过的**：relay 真报额度错误时的冷却秒数（要真被限流才碰得到）。
 
 ## 提问比模型更重要（实测结论）

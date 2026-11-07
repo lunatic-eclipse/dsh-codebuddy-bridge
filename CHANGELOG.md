@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.2 — 2026-11-07
+
+- **默认权限模式改回 `dontAsk`**：`index.js` 与 `cordis.patch.yml` 里一直是 `acceptEdits`，而 `docs/CONTEXT.md`、
+  `HANDOFF.md` 和"任务层"文档都写着"只读轮必须 `dontAsk`"——代码和文档互相打架，且踩中的是无人值守卡死那条。
+  现在默认 `dontAsk`：读工具放行、写工具直接拒、永不等人。
+- **改文件变成显式选择**：`workbuddy_task` 新增 `permissionMode` 参数（`dontAsk` / `default` / `auto` / `plan` /
+  `acceptEdits` / `bypassPermissions`），要它真动手就传 `acceptEdits`；换模式会重开会话（权限模式是启动参数）。
+  relay 那条路不变，仍是 `--edit` 那一轮转 `acceptEdits`。
+- **`workbuddy_status` 不再把两个路径混成一个数**：分两行报——`workbuddy_task` 直连的，和 relay/review 走
+  `/codebuddy`（由 `cliBridge.permissionMode` 决定）的。之前只报前者，读起来像是全局生效。
+- 新增 `test/permission.test.mjs`（4 例），钉住默认值、配置覆盖、以及非法模式被拒。
+
 ## 0.3.1 — 2026-11-06
 
 - **失败/中断的轮次也会留痕**：取消、CLI 中途死掉、或 DSH 在收尾前退出，以前什么都不写——

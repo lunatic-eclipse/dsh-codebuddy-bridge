@@ -76,6 +76,23 @@ const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_IDLE_MS = 60 * 60 * 1000;
 const MAX_STDERR = 8 * 1024;
 
+/**
+ * Values the CLI accepts for `--permission-mode`. Mirrors the list the relay
+ * plugin validates against, so a typo is refused here instead of surfacing as
+ * an opaque engine error three seconds later.
+ */
+const PERMISSION_MODES = ['dontAsk', 'default', 'auto', 'plan', 'acceptEdits', 'bypassPermissions'];
+
+/**
+ * Read-only rounds must never wait for a human. `dontAsk` auto-approves the read
+ * half and refuses the write half without prompting, which is the only mode that
+ * is both safe and useful unattended — measured against the real CLI: under
+ * `acceptEdits` a run that touches a shell tool parks on an approval request and
+ * dies with "no human is at the terminal to approve tool use". Editing is an
+ * explicit opt-in per call (`permissionMode: "acceptEdits"`), not the default.
+ */
+const DEFAULT_PERMISSION_MODE = 'dontAsk';
+
 /** Tools hidden from an agent while collaboration mode is off for its session. */
 const GATED_TOOLS = ['codebuddy_ask', 'workbuddy_relay', 'workbuddy_review', 'workbuddy_task', 'workbuddy_dispatch'];
 
@@ -2020,7 +2037,7 @@ class WorkBuddyBridge {
     this.defaults = {
       cwd: config.cwd ?? ctx.get('workingDirectory')?.defaultDirectory ?? process.cwd(),
       model: config.model,
-      permissionMode: config.permissionMode ?? 'acceptEdits',
+      permissionMode: config.permissionMode ?? DEFAULT_PERMISSION_MODE,
       allowedTools: Array.isArray(config.allowedTools) ? config.allowedTools : [],
       disallowedTools: Array.isArray(config.disallowedTools) ? config.disallowedTools : [],
       appendSystemPrompt:
@@ -2716,7 +2733,7 @@ export function apply(ctx, config = {}) {
       name: 'workbuddy_context',
       description:
         '第一次在这个会话里碰到这个插件时，先调它一次：返回一分钟能读完的项目简报——' +
-        '分工（它是外脑、DSH 是手）、三条硬约束（permissionMode 必须 dontAsk、一轮 7–27 积分且不可预估、' +
+        '分工（它是外脑、DSH 是手）、三条硬约束（只读轮必须 dontAsk、一轮 7–27 积分且不可预估、' +
         '每会话 6 轮/小时）、已完成与待办、以及"怎么问它才有用"的实测结论。纯本地读文件，不花额度。',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       output: {
@@ -2737,7 +2754,7 @@ export function apply(ctx, config = {}) {
       description:
         '把当前任务或审核意见交给本机的 WorkBuddy 代理执行一轮，并返回它的回复、动作清单和被拦下的操作。' +
         '同一个 DSH 会话里连续调用会保持同一个 WorkBuddy 会话，因此可以来回协商。' +
-        '需要人类批准的操作会以 DSH 审批卡片的形式出现。',
+        '默认 `dontAsk`：读工具放行、写工具被拒、永不等人；真要它改文件，显式传 permissionMode="acceptEdits"。',
       parameters: {
         type: 'object',
         properties: {
@@ -2753,6 +2770,14 @@ export function apply(ctx, config = {}) {
             type: 'boolean',
             description: '可选：丢弃已有对话，开一个新的 WorkBuddy 会话。',
           },
+          permissionMode: {
+            type: 'string',
+            enum: PERMISSION_MODES,
+            description:
+              '可选：本轮的权限模式，默认取插件配置（dontAsk）。dontAsk = 只读，写操作被拒且不会卡住；' +
+              'acceptEdits = 允许改文件（有人值守时用，审批走 DSH 卡片）；bypassPermissions = 全部放行。' +
+              '换模式会重开一个 WorkBuddy 会话（权限模式是进程启动参数，不能中途改）。',
+          },
         },
         required: ['prompt'],
         additionalProperties: false,
@@ -2766,7 +2791,24 @@ export function apply(ctx, config = {}) {
         const prompt = typeof args?.prompt === 'string' ? args.prompt.trim() : '';
         if (!prompt) throw new Error('prompt 不能为空。');
         const cwd = typeof args?.cwd === 'string' && args.cwd.length > 0 ? args.cwd : bridge.defaults.cwd;
-        const session = bridge.sessionFor(exec.agent, { cwd, reset: args?.reset === true });
+        const permissionMode =
+          typeof args?.permissionMode === 'string' && args.permissionMode.length > 0
+            ? args.permissionMode
+            : bridge.defaults.permissionMode;
+        if (!PERMISSION_MODES.includes(permissionMode)) {
+          throw new Error(`permissionMode "${permissionMode}" 不是合法值；合法值：${PERMISSION_MODES.join(', ')}`);
+        }
+        // The mode is a startup flag, so a session already running with a
+        // different one has to be replaced — silently keeping the old mode would
+        // make an edit-enabled call read as refused writes and look like a bug.
+        const key = exec.agent?.id ? String(exec.agent.id) : 'global';
+        const running = bridge.sessions.get(key);
+        const modeChanged = Boolean(running && !running.disposed && running.options?.permissionMode !== permissionMode);
+        const session = bridge.sessionFor(exec.agent, {
+          cwd,
+          permissionMode,
+          reset: args?.reset === true || modeChanged,
+        });
         const result = await session.send(prompt, { agent: exec.agent, signal: exec.signal });
         return {
           reply: result.reply ?? '',
@@ -2798,7 +2840,9 @@ export function apply(ctx, config = {}) {
           `引擎：${bridge.cliPath ?? '（未找到）'}`,
           `产品配置：${bridge.productConfig ?? '（未使用）'}`,
           `认证：${bridge.authToken ? '环境变量 CODEBUDDY_AUTH_TOKEN' : bridge.apiKey ? '环境变量 CODEBUDDY_API_KEY' : '引擎自身登录态（需先在 WorkBuddy 引擎里 /login）'}`,
-          `权限模式：${bridge.defaults.permissionMode}`,
+          `权限模式（本插件直连 / workbuddy_task）：${bridge.defaults.permissionMode}`,
+          '权限模式（relay / review 走 /codebuddy）：由 dsh-connect-workbuddy 的 cliBridge.permissionMode 决定'
+            + '（默认 dontAsk，`--edit` 那一轮转 acceptEdits）',
           `工作目录：${session?.options?.cwd ?? bridge.defaults.cwd}`,
           `当前会话：${session ? (session.disposed ? '已关闭' : session.sessionId ?? '已启动，尚未产生会话 ID') : '未启动'}`,
           `交换目录：${bridge.collabDir}`,

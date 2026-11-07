@@ -81,7 +81,7 @@ dsh plugin --profile web add github:<owner>/<repo>
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `collabDir` | `~/.dsh/codebuddy-bridge` | 交换目录：轮次记录、模式开关、报告 |
-| `permissionMode` | `acceptEdits` | 透传给引擎；`bypassPermissions` 为完全放行 |
+| `permissionMode` | `dontAsk` | 透传给引擎：读放行、写拒绝、永不等人。改文件要显式开（`workbuddy_task` 传 `acceptEdits`，relay 加 `--edit`）；`bypassPermissions` 为完全放行 |
 | `cliPath` | 自动探测 | CodeBuddy CLI 入口，仅 Windows 默认路径 |
 | `productConfig` | 自动探测 | 让入口以 WorkBuddy 身份工作 |
 | `model` | 引擎默认 | 透传 `--model` |
